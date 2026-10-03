@@ -21,3 +21,43 @@ keywords:
   - data contamination
   - decontamination
   - benchmarks
+references:
+  - type: article
+    title: "MixtureVitae: Open Web-Scale Pretraining Dataset With High Quality Instruction and Reasoning Data Built from Permissive-First Text Sources"
+    authors:
+      - given-names: "Huu"
+        family-names: "Nguyen"
+      - given-names: "Victor"
+        family-names: "May"
+      - given-names: "Harsh"
+        family-names: "Raj"
+      - given-names: "Marianna"
+        family-names: "Nezhurina"
+      - given-names: "Yishan"
+        family-names: "Wang"
+      - given-names: "Yanqi"
+        family-names: "Luo"
+      - given-names: "Minh Chien"
+        family-names: "Vu"
+      - given-names: "Taishi"
+        family-names: "Nakamura"
+      - given-names: "Ken"
+        family-names: "Tsui"
+      - given-names: "Van Khue"
+        family-names: "Nguyen"
+      - given-names: "David"
+        family-names: "Salinas"
+      - given-names: "Aleksandra"
+        family-names: "Krasnodębska"
+      - given-names: "Christoph"
+        family-names: "Schuhmann"
+      - given-names: "Mats Leon"
+        family-names: "Richter"
+      - given-names: "Xuan-Son"
+        family-names: "Vu"
+      - given-names: "Jenia"
+        family-names: "Jitsev"
+    year: 2025
+    doi: "10.48550/arXiv.2509.25531"
+    url: "https://arxiv.org/abs/2509.25531"
+    notes: "corpus-assay descends from the decontamination pipeline of this paper (Appendix D)."

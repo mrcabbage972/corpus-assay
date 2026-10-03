@@ -294,6 +294,16 @@ if __name__ == "__main__":  # required: scan workers are spawned processes
 - [CLI reference](https://github.com/mrcabbage972/corpus-assay/blob/main/docs/cli.md)
 - [Experimental: spaced seeds](https://github.com/mrcabbage972/corpus-assay/blob/main/docs/experimental-spaced-seeds.md)
 - [Architecture](https://github.com/mrcabbage972/corpus-assay/blob/main/docs/architecture.md)
+- [Relation to the MixtureVitae decontamination](https://github.com/mrcabbage972/corpus-assay/blob/main/docs/lineage.md)
+
+## Background
+
+corpus-assay grew out of the decontamination pipeline used for the 13-gram
+contamination analysis of [MixtureVitae](https://arxiv.org/abs/2509.25531) (Appendix D).
+It keeps that pipeline's normalization, hashing and flagging thresholds, but some
+changes alter results, so default runs do not reproduce the paper's numbers exactly.
+[docs/lineage.md](https://github.com/mrcabbage972/corpus-assay/blob/main/docs/lineage.md)
+lists the changes and how to get close to the original protocol.
 
 ## Citing
 

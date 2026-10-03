@@ -61,7 +61,7 @@ Each shard is processed by one worker process, in this order:
    memory.
 2. Each row is split into **sub-documents** on `<|endoftext|>`, the packed-document
    separator; the variant typo `<|endoftext}>` is treated the same way. Sub-documents
-   shorter than `2·n` characters or `n` tokens are skipped. Counts and records refer to
+   shorter than `2·n` bytes or `n` tokens are skipped. Counts and records refer to
    sub-documents, with ids `<id>-part-<k>`.
 3. The sub-document is normalized and its **distinct** allowed n-gram hashes are
    collected.
