@@ -7,8 +7,8 @@
 
 <p align="center">
   <a href="https://github.com/mrcabbage972/corpus-assay/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/mrcabbage972/corpus-assay/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://pypi.org/project/corpus-assay/"><img alt="PyPI" src="https://img.shields.io/pypi/v/corpus-assay.svg"></a>
-  <a href="https://pypi.org/project/corpus-assay/"><img alt="Python versions" src="https://img.shields.io/pypi/pyversions/corpus-assay.svg"></a>
+  <a href="https://pypi.org/project/corpus-assay/"><img alt="PyPI" src="https://img.shields.io/pypi/v/corpus-assay.svg?logo=pypi&amp;logoColor=white"></a>
+  <a href="https://pypi.org/project/corpus-assay/"><img alt="Python versions" src="https://img.shields.io/pypi/pyversions/corpus-assay.svg?logo=python&amp;logoColor=white"></a>
   <a href="https://github.com/mrcabbage972/corpus-assay/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
   <a href="https://doi.org/10.5281/zenodo.23125328"><img alt="DOI" src="https://zenodo.org/badge/DOI/10.5281/zenodo.23125328.svg"></a>
 </p>
