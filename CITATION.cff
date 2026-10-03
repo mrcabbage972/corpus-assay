@@ -11,6 +11,9 @@ authors:
 repository-code: "https://github.com/mrcabbage972/corpus-assay"
 license: Apache-2.0
 version: 0.1.0
+# Zenodo archives every GitHub Release of this repository. Each release gets its own
+# version DOI, and one concept DOI covers all versions (it resolves to the latest).
+# The concept DOI goes in `doi:` once Zenodo has archived the first release (v0.1.0).
 keywords:
   - large language models
   - evaluation

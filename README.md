@@ -1,9 +1,16 @@
-# corpus-assay
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/mrcabbage972/corpus-assay/main/docs/assets/logo-dark.svg">
+    <img alt="corpus-assay: audit benchmark overlap" src="https://raw.githubusercontent.com/mrcabbage972/corpus-assay/main/docs/assets/logo.svg" width="560">
+  </picture>
+</h1>
 
-[![CI](https://github.com/mrcabbage972/corpus-assay/actions/workflows/ci.yml/badge.svg)](https://github.com/mrcabbage972/corpus-assay/actions/workflows/ci.yml)
-[![PyPI](https://img.shields.io/pypi/v/corpus-assay.svg)](https://pypi.org/project/corpus-assay/)
-[![Python versions](https://img.shields.io/pypi/pyversions/corpus-assay.svg)](https://pypi.org/project/corpus-assay/)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/mrcabbage972/corpus-assay/blob/main/LICENSE)
+<p align="center">
+  <a href="https://github.com/mrcabbage972/corpus-assay/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/mrcabbage972/corpus-assay/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://pypi.org/project/corpus-assay/"><img alt="PyPI" src="https://img.shields.io/pypi/v/corpus-assay.svg"></a>
+  <a href="https://pypi.org/project/corpus-assay/"><img alt="Python versions" src="https://img.shields.io/pypi/pyversions/corpus-assay.svg"></a>
+  <a href="https://github.com/mrcabbage972/corpus-assay/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
+</p>
 
 **Find benchmark contamination in LLM training corpora.** corpus-assay builds a hashed
 n-gram index from evaluation benchmarks, streams your Parquet/JSONL shards through a
@@ -291,7 +298,8 @@ if __name__ == "__main__":  # required: scan workers are spawned processes
 
 If you use corpus-assay in your research, please cite it using
 [CITATION.cff](https://github.com/mrcabbage972/corpus-assay/blob/main/CITATION.cff)
-(GitHub's "Cite this repository" button).
+(GitHub's "Cite this repository" button). Every release is archived on Zenodo with its
+own DOI. The concept DOI in `CITATION.cff` covers all versions.
 
 ## Contributing
 

@@ -22,12 +22,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Tag matches Cargo.toml version
+      - name: Tag matches Cargo.toml and CITATION.cff versions
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           version=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['package']['version'])")
           if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
             echo "Tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${version}" >&2
+            exit 1
+          fi
+          # Zenodo takes the archived release's metadata from CITATION.cff.
+          cff_version=$(sed -n 's/^version: *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p' CITATION.cff)
+          if [ "${cff_version}" != "${version}" ]; then
+            echo "CITATION.cff version '${cff_version}' does not match ${version}" >&2
             exit 1
           fi
 

@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="314" height="218" viewBox="0 0 314 218" role="img" aria-label="corpus-assay">
+  <title>corpus-assay</title>
+  <rect width="314" height="218" rx="28" fill="#0F172A"/>
+  <g transform="translate(34 34)">
+  <path d="M46.0 0 H4.0 Q0 0 0 4.0 V146.0 Q0 150.0 4.0 150.0 H46.0 V132.0 H18.0 V18.0 H46.0 Z" fill="#FFFFFF"/>
+  <path d="M200.0 0 H242.0 Q246.0 0 246.0 4.0 V146.0 Q246.0 150.0 242.0 150.0 H200.0 V132.0 H228.0 V18.0 H200.0 Z" fill="#FFFFFF"/>
+  <rect x="215" y="38.25" width="13" height="3.5" rx="1" fill="#FFFFFF"/>
+  <rect x="220.5" y="51.75" width="7.5" height="3.5" rx="1" fill="#FFFFFF"/>
+  <rect x="215" y="65.25" width="13" height="3.5" rx="1" fill="#FFFFFF"/>
+  <rect x="220.5" y="78.75" width="7.5" height="3.5" rx="1" fill="#FFFFFF"/>
+  <rect x="215" y="92.25" width="13" height="3.5" rx="1" fill="#FFFFFF"/>
+  <rect x="220.5" y="105.75" width="7.5" height="3.5" rx="1" fill="#FFFFFF"/>
+  <rect x="215" y="119.25" width="13" height="3.5" rx="1" fill="#FFFFFF"/>
+  <rect x="38" y="33" width="104" height="72" rx="12" fill="#93C5FD"/>
+  <rect x="101" y="54" width="101" height="71" rx="12" fill="#3B82F6"/>
+  <rect x="101" y="54" width="41" height="51" rx="7" fill="#F59E0B"/>
+  </g>
+</svg>

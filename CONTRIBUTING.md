@@ -42,8 +42,9 @@ Useful targets:
 
 ## Releasing (maintainers)
 
-1. Bump `version` in `Cargo.toml` (the single source of the package version) and date
-   the CHANGELOG section.
+1. Bump `version` in `Cargo.toml` (the single source of the package version), set
+   `version` and `date-released` in `CITATION.cff`, and date the CHANGELOG section. The
+   release workflow refuses a tag that doesn't match `Cargo.toml` and `CITATION.cff`.
 2. Optionally dry-run: run the *Release* workflow manually with `publish: testpypi`.
 3. Tag and push: `git tag -a vX.Y.Z -m "corpus-assay X.Y.Z" && git push origin vX.Y.Z`.
    The workflow then:
@@ -52,3 +53,7 @@ Useful targets:
    3. publishes to TestPyPI and verifies the install;
    4. publishes to PyPI after approval of the `pypi` environment;
    5. creates the GitHub Release.
+
+   Zenodo's GitHub integration archives the GitHub Release and mints a DOI for that
+   version. The concept DOI in `CITATION.cff` and the README badge covers all versions,
+   so it doesn't change between releases.
