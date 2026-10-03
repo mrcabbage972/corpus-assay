@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "corpus-assay: benchmark contamination detection for LLM training corpora"
+abstract: >-
+  Fast, auditable n-gram detection of evaluation-benchmark contamination in LLM
+  training corpora, with a Rust scanner and per-benchmark and per-item attribution.
+authors:
+  - family-names: May
+    given-names: Victor
+repository-code: "https://github.com/mrcabbage972/corpus-assay"
+license: Apache-2.0
+version: 0.1.0
+keywords:
+  - large language models
+  - evaluation
+  - data contamination
+  - decontamination
+  - benchmarks

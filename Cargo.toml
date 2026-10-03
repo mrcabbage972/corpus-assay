@@ -1,0 +1,44 @@
+[package]
+name = "corpus-assay"
+version = "0.1.0"
+edition = "2021"
+description = "Rust core of corpus-assay (benchmark contamination detection); built as a Python extension."
+license = "Apache-2.0"
+repository = "https://github.com/mrcabbage972/corpus-assay"
+publish = false
+
+[lib]
+name = "corpus_assay"
+crate-type = ["cdylib"]
+
+[dependencies]
+# Python bindings (stable ABI: one wheel per platform covers CPython >= 3.12)
+pyo3 = { version = "0.26.0", features = ["extension-module", "abi3-py312"] }
+
+# Hash maps / sets and one-time global initialization
+hashbrown = "0.14"
+once_cell = "1.18"
+
+# Text normalization and n-gram hashing
+unicode-normalization = "0.1"
+regex = "1.10"
+blake2 = "0.10"
+hex = "0.4"
+sha2 = "0.10"
+
+# Binary artifact I/O
+byteorder = "1.5"
+tempfile = "3"
+memmap2 = "0.9"
+
+# Parquet input
+parquet = "53.0.0"
+arrow = "53.0.0"
+
+# JSON metadata
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

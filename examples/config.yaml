@@ -1,0 +1,21 @@
+# Example corpus-assay config. Validate with:
+#   corpus-assay validate-config --config examples/config.yaml --allow-unpinned
+benchmarks:
+  - name: GSM8K
+    dataset: openai/gsm8k
+    configs: [main]
+    splits: [test]
+    fields: [question, answer]
+    # Pin a Hub commit for a reproducible index (otherwise pass --allow-unpinned):
+    # revision: <commit-sha>
+    # Optional: drop n-grams that also occur in the train split, so the index is
+    # specific to the test split.
+    # subtraction_splits: [train]
+
+  # Registry shorthand (see `corpus-assay list-benchmarks`):
+  - mmlu
+
+# Decontamination thresholds (used by build-index, scan, run, run-hf)
+ngram: 13
+min_hits: 3
+min_coverage: 0.001
