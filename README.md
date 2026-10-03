@@ -10,6 +10,7 @@
   <a href="https://pypi.org/project/corpus-assay/"><img alt="PyPI" src="https://img.shields.io/pypi/v/corpus-assay.svg"></a>
   <a href="https://pypi.org/project/corpus-assay/"><img alt="Python versions" src="https://img.shields.io/pypi/pyversions/corpus-assay.svg"></a>
   <a href="https://github.com/mrcabbage972/corpus-assay/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
+  <a href="https://doi.org/10.5281/zenodo.23125328"><img alt="DOI" src="https://zenodo.org/badge/DOI/10.5281/zenodo.23125328.svg"></a>
 </p>
 
 **Find benchmark contamination in LLM training corpora.** corpus-assay builds a hashed
@@ -299,7 +300,8 @@ if __name__ == "__main__":  # required: scan workers are spawned processes
 If you use corpus-assay in your research, please cite it using
 [CITATION.cff](https://github.com/mrcabbage972/corpus-assay/blob/main/CITATION.cff)
 (GitHub's "Cite this repository" button). Every release is archived on Zenodo with its
-own DOI. The concept DOI in `CITATION.cff` covers all versions.
+own DOI. The concept DOI [10.5281/zenodo.23125328](https://doi.org/10.5281/zenodo.23125328)
+covers all versions.
 
 ## Contributing
 
