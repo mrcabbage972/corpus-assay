@@ -23,7 +23,8 @@ from corpus_assay.constants import DEFAULT_NGRAM_CONFIG_PATH
 
 pytestmark = pytest.mark.e2e
 
-# Three protected items: long, content-rich, disjoint vocabularies.
+# Three protected items: long, content-rich, disjoint vocabularies. The first two
+# have n-grams in both fields (question and answer).
 ITEMS = [
     {
         "question": (
@@ -31,7 +32,11 @@ ITEMS = [
             "while topoisomerase relieves torsional strain downstream and primase "
             "lays short primers for polymerase extension"
         ),
-        "answer": "helicase separates complementary strands using hydrolysis energy",
+        "answer": (
+            "helicase separates complementary strands using energy from atp "
+            "hydrolysis while single strand binding proteins stabilise the exposed "
+            "template bases"
+        ),
     },
     {
         "question": (
@@ -39,7 +44,10 @@ ITEMS = [
             "second after twelve seconds compute the displacement covered during "
             "that interval assuming negligible drag forces"
         ),
-        "answer": "one hundred eight metres follows from average velocity times duration",
+        "answer": (
+            "one hundred eight metres follows from the average velocity of nine "
+            "metres per second multiplied by the twelve second duration of motion"
+        ),
     },
     {
         # Plain synthetic tokens so the spaced-seed edit below is easy to reason about.
@@ -163,11 +171,26 @@ def test_validate_build_scan_report(
     assert summary["total_docs_scanned"] == 12
     assert summary["total_contaminated"] == 2
 
+    # Shard a holds item 0's question and answer, shard b item 1's question only.
+    hits = {r["doc_id"]: r["item_hits"][0] for r in _records(out) if r.get("item_hits")}
+    assert hits["p9-part-0"]["fields_matched"] == ["question", "answer"]
+    assert hits["j1-part-0"]["fields_matched"] == ["question"]
+
     _cli("inspect-run", "--scan-dir", str(out), env=env)
     _cli("report", "--scan-dir", str(out), env=env)
     with (out / "report" / "leak_by_benchmark.csv").open(encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
     assert any("TinyQA" in json.dumps(row) for row in rows)
+    report = json.loads((out / "report" / "report.json").read_text("utf-8"))
+    assert report["field_matches"] == {
+        "records": 2,
+        "item_matches": 2,
+        "full": 1,
+        "question_only": 1,
+        "partial": 0,
+        "single_field": 0,
+    }
+    assert "| 1 | 1 | 0 | 0 |" in (out / "report" / "report.md").read_text("utf-8")
 
 
 def test_run_caches_index_per_ngram_config(

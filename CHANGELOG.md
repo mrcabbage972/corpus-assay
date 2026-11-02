@@ -46,6 +46,13 @@ All notable changes to this project are documented here. The format follows
   `ScanConfig.packed_doc_sep` and the Rust `scan_stream_rust` accept `None`, and the
   run manifest records `packed_doc_sep: null`.
 
+- Which fields of an item matched (#3). Records' `item_hits` entries gain
+  `field_hits` (`[field_idx, hits]` per matched spec field) and `fields_matched` (the
+  field names), so a copy of a whole multiple-choice item (question and choices) is
+  told apart from one of the question alone. `report` counts the item matches of the
+  sampled records as full-item, question-only, partial and single-field
+  (`field_matches` in `report.json`, a table in `report.md`).
+
 ### Changed
 
 - **Index metadata schema version 2.** `<index>.native.meta.json` gains
@@ -64,6 +71,17 @@ All notable changes to this project are documented here. The format follows
   - `boolq`: `aps/super_glue` (config `boolq`) instead of `google/boolq`.
   - `copa`: fields `premise, choice1, choice2` (`question` dropped).
   - `lambada`: the `default` config, named explicitly.
+- **Item postings format v2 (binary format change).** `<index>.native.items` records
+  are now `<u64 hash, u32 n, n × (u32 item_idx, u32 field_mask)>`: bit `k` of the
+  mask says the n-gram occurs in the item's `k`-th spec field. The header is the same
+  CAFMTv1 header; v2 is told apart by its file type (5, where v1 is 4), so 0.1.x
+  readers reject a v2 file instead of misreading it. `build-index` hashes each field
+  on its own (the n-grams are the same as before, since they never crossed fields),
+  and `.items.meta.json` gains `format_version` and `fields`, each benchmark's field
+  names. **Old indexes still load and scan**, but have no field information: their
+  records carry no `field_hits`, and `report` skips the field table. Rebuild to get
+  them; `run` / `run-hf` rebuild a cached index whose `.items` is v1 (or that lacks
+  `.items.meta.json`).
 - Every registry entry is pinned to a Hub commit, so configs written by `init-config`
   pass the revision-pin check without `--allow-unpinned`.
 - **Record schema v3.** `contaminated_docs/*.ndjson` records now have
@@ -87,6 +105,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- A resumed scan reused shard summaries computed against an earlier `.items` or
+  `.items.meta.json` when the item sidecars were rebuilt in place (only `.native`,
+  `.attr` and `.meta.json` were fingerprinted). The run fingerprint now hashes both.
 - The `run`/`run-hf` index cache was keyed on the config file's text, so a config
   naming registry keys reused an index built from the old registry entries after the
   registry changed. The key now also hashes the resolved benchmark specs. Existing

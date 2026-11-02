@@ -8,8 +8,8 @@ All binary files are little-endian. Every JSON sidecar carries a `schema_version
 | --- | --- |
 | `<index>.native` | Header (type 1) + sorted `u64` n-gram hashes |
 | `<index>.native.attr` | Header (type 2) + `<u64 hash, u64 benchmark_mask>` records, sorted by hash |
-| `<index>.native.items` | Header (type 4) + per hash: `<u64 hash, u32 n, n × u32 item_idx>` |
-| `<index>.native.items.meta.json` | Item table: `(benchmark, item_id, n_protected_hashes)` per item index |
+| `<index>.native.items` | Item postings, format v2: header (type 5) + per hash, sorted: `<u64 hash, u32 n, n × (u32 item_idx, u32 field_mask)>` |
+| `<index>.native.items.meta.json` | Item table: `(benchmark, item_id, n_protected_hashes)` per item index, plus `fields`: each benchmark's field names, in spec order |
 | `<index>.native.sources.json` | Benchmark legend: `id_to_name`, `name_to_id`, per-benchmark hash totals |
 | `<index>.native.meta.json` | Provenance: tool versions, `ngram`, normalization config hash/SHA, hash function, benchmark specs, HF dataset fingerprints and resolved revisions, and per-benchmark counts (`benchmark_stats`) |
 
@@ -22,6 +22,21 @@ those with none included) and the `min_hits` used. Version 1 files have no
 
 Bit `i` of a benchmark mask is set when the n-gram occurs in benchmark `id_to_name[i]`.
 
+### Item postings (`.items`)
+
+Each posting names an item (its index in `.items.meta.json`) and, in format v2, a
+field mask: bit `k` is set when the n-gram occurs in the item's `k`-th spec field
+(`fields[<benchmark>][k]`; fields past the 32nd share bit 31). Each field is hashed on
+its own at build time, so an n-gram belongs to one field of an item, or to several
+when the fields repeat text. An item's `n_protected_hashes` is its number of postings.
+
+The two formats are told apart by the header's file type, not its format version
+(which stays 1): type 4 is v1, `<u64 hash, u32 n, n × u32 item_idx>`, written by
+0.1.x; type 5 is v2. Both load. A v1 sidecar has no field information, so records
+scanned against it carry no `field_hits`, and `report` skips the field-match table;
+rebuild the index to get them. `run` / `run-hf` rebuild a cached index whose `.items`
+is v1.
+
 ### Common binary header (36 bytes)
 
 Used by `.native`, `.attr`, `.items`, and `hits.bin`.
@@ -29,7 +44,7 @@ Used by `.native`, `.attr`, `.items`, and `hits.bin`.
 | Offset | Type | Field |
 | --- | --- | --- |
 | 0 | `8s` | magic `CAFMTv1\0` |
-| 8 | `u32` | file type: 1 hashes, 2 attribution masks, 3 hit pairs, 4 item postings |
+| 8 | `u32` | file type: 1 hashes, 2 attribution masks, 3 hit pairs, 4 item postings v1, 5 item postings v2 |
 | 12 | `u32` | format version (`1`) |
 | 16 | `u32` | endianness marker `0x01020304` |
 | 20 | `u32` | n-gram length |
@@ -83,7 +98,8 @@ normalization hashes.
   re-checks the recorded hashes, and re-runs the scan.
 - **`summaries/<shard>.summary.json`** holds per-shard counts, an `error` field when the
   shard failed, and a run fingerprint. A re-run with the same fingerprint skips the
-  shard. The fingerprint covers the index, config, and normalization config.
+  shard. The fingerprint covers the index (including `.items` and
+  `.items.meta.json`), config, and normalization config.
 - **`per_source_hits/<shard>.hits.bin`** has a header of type 3, then
   `<u64 hash, u64 mask>` for **every** distinct matched hash in the shard. `report`
   aggregates these files.
@@ -99,7 +115,9 @@ normalization hashes.
   {"schema_version": 3, "doc_id": "doc500-part-0", "match_count": 85,
    "src_hits": [[0, 85]],
    "item_hits": [{"item_id": 7, "hits": 85, "longest_run_tokens": 75,
-                  "unique_hits": 85, "shared_hits": 0, "boilerplate_hits": 0}],
+                  "unique_hits": 85, "shared_hits": 0, "boilerplate_hits": 0,
+                  "field_hits": [[0, 60], [1, 25]],
+                  "fields_matched": ["question", "choices"]}],
    "field": "text"}
   ```
 
@@ -122,13 +140,20 @@ normalization hashes.
     `<k>` counts the packed parts of one text from 0. Non-string ids (integers, ...)
     are cast to strings.
   - `src_hits` contains `[benchmark_id, hits]` pairs.
-  - `item_hits` is present when the index has item postings.
+  - `item_hits` is present when the index has item postings: one entry per item
+    that clears the gate on its own (`item_id` indexes `.items.meta.json`).
+    `field_hits` lists `[field_idx, hits]` for each of the item's spec fields with a
+    hit (a hash in two fields of the item counts in both), and `fields_matched`
+    names them, so a copy of a whole multiple-choice item (question and choices)
+    reads differently from one of the question alone. Both are absent with a v1
+    `.items` sidecar.
   - `spaced_item` appears when the experimental spaced-seed channel flagged the
     document.
   - `field` is the column the sub-document came from (a text key, or the messages
     key). For a chat turn, `role` is the turn's role (omitted when it has none) and
     `turn` its index in the messages list, counted from 0.
-  - Schema history: v3 added `field`, `role` and `turn`; v2 added `item_hits` and
+  - Schema history: v3 added `field`, `role` and `turn`, and later the optional
+    `item_hits` fields `field_hits` and `fields_matched`; v2 added `item_hits` and
     `spaced_item`. Readers (`inspect-run`, `report`) still accept v2 records.
 
 ## Reports (`report`)
@@ -136,6 +161,11 @@ normalization hashes.
 `<out_dir>/report/` (or `--out-dir`) contains:
 
 - **`report.md` / `report.json`:** run overview, scan summary, and the top tables.
+  With a v2 `.items` sidecar, `field_matches` counts the item matches in the sampled
+  records (`contaminated_docs/`) by which fields matched: `full` (every field of the
+  item that has n-grams, e.g. question and choices), `question_only` (only the first
+  spec field), `partial` (another subset) and `single_field` (the item has n-grams in
+  one field only).
 - **`leak_by_benchmark.csv` / `.json`:** `benchmark`, `total_hashes_in_index`,
   `leaked_hashes`, `leak_fraction`.
 - **`leak_by_shard.csv` / `.json`:** unique leaked hashes per shard, per 1k documents.

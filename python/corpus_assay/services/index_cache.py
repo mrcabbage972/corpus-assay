@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from corpus_assay._version import dist_version
+from corpus_assay.attribution import ITEMS_FORMAT_VERSION, AttributionIndex
 from corpus_assay.benchmark_spec import BenchmarkSpec
 from corpus_assay.config import BuildIndexConfig, load_decontamination_config
 from corpus_assay.indexing import build_index_hf
@@ -47,12 +48,26 @@ def native_index_required_paths(
         # gating under gate_mode="auto". (The standalone `scan` command does not
         # require it — there, auto degrades to union for legacy indexes.)
         paths.append(native_sidecar(native_path, ".items"))
+        paths.append(native_sidecar(native_path, ".items.meta.json"))
     return paths
 
 
 def native_index_ready(native_path: Path) -> bool:
+    """Whether a cached index is complete and current.
+
+    A cache whose ``.items`` predates field masks (format v1) is rebuilt, so
+    ``run`` / ``run-hf`` records report which item fields matched.
+    """
     required = native_index_required_paths(native_path, require_items=True)
-    return all(path.exists() for path in required)
+    if not all(path.exists() for path in required):
+        return False
+    try:
+        version = AttributionIndex.items_sidecar_version(
+            str(native_sidecar(native_path, ".items"))
+        )
+    except (OSError, ValueError):
+        return False
+    return version >= ITEMS_FORMAT_VERSION
 
 
 def benchmark_specs_hash(benchmarks: Iterable[BenchmarkSpec]) -> str:

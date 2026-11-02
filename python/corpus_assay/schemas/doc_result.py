@@ -5,7 +5,8 @@ from pydantic import BaseModel, ConfigDict, Field
 # v2 adds per-item attribution evidence (item_hits) and spaced_item, emitted by
 # the scanner in item gate mode / union mode with an `.items` sidecar.
 # v3 adds where in the record the sub-document came from: `field` (the text or
-# messages column), and for chat turns `role` and `turn`. Mirrors
+# messages column), and for chat turns `role` and `turn`. Later additions are
+# optional fields under v3 (item_hits' field_hits / fields_matched). Mirrors
 # DOC_RESULT_SCHEMA_VERSION in src/scan.rs.
 DOC_RESULT_SCHEMA_VERSION = 3
 
@@ -26,6 +27,10 @@ class ItemHitOut(BaseModel):
     unique_hits: int = Field(default=0, ge=0)
     shared_hits: int = Field(default=0, ge=0)
     boilerplate_hits: int = Field(default=0, ge=0)
+    # v3, with an `.items` v2 sidecar: `[field_idx, hits]` per matched field of
+    # the item, and the matched fields' names. Absent for `.items` v1 sidecars.
+    field_hits: list[tuple[int, int]] = Field(default_factory=list)
+    fields_matched: list[str] = Field(default_factory=list)
 
 
 class DocResult(BaseModel):

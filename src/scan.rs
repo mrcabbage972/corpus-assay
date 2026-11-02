@@ -38,7 +38,12 @@ use std::sync::{Arc, Mutex};
 /// evidence), `shared_hits` (n-gram shared by a few items) and `boilerplate_hits`
 /// (n-gram present in `>= boilerplate_threshold` items — near-worthless), by the
 /// item fan-out of each matched hash.
-#[derive(Serialize, Clone, Copy)]
+///
+/// `field_hits` lists `[field_idx, hits]` for each of the item's spec fields with
+/// at least one hit (a hash in several fields of the item counts in each), and
+/// `fields_matched` names those fields. Both are absent for `.items` v1 sidecars,
+/// which carry no field information.
+#[derive(Serialize, Clone)]
 struct ItemHit {
     item_id: u32,
     hits: usize,
@@ -46,6 +51,10 @@ struct ItemHit {
     unique_hits: usize,
     shared_hits: usize,
     boilerplate_hits: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    field_hits: Vec<(u32, usize)>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    fields_matched: Vec<String>,
 }
 
 /// Version of the flagged-document records (`FileScanResult`); mirrored by
@@ -203,8 +212,8 @@ fn item_gate(
     for h in indexed.iter() {
         if let Some(items) = postings.hash_to_items.get(h) {
             let fan_out = items.len();
-            for &it in items {
-                let e = per_item_hits.entry(it).or_insert((0, 0, 0));
+            for posting in items {
+                let e = per_item_hits.entry(posting.item).or_insert((0, 0, 0));
                 if fan_out <= 1 {
                     e.0 += 1;
                 } else if fan_out >= boilerplate_threshold {
@@ -227,8 +236,8 @@ fn item_gate(
             continue;
         }
         if let Some(items) = postings.hash_to_items.get(&h) {
-            for &it in items {
-                let e = state.entry(it).or_insert((-1, 0, 0));
+            for posting in items {
+                let e = state.entry(posting.item).or_insert((-1, 0, 0));
                 if e.1 > 0 && pos as i64 == e.0 + 1 {
                     e.1 += 1;
                 } else {
@@ -272,12 +281,61 @@ fn item_gate(
             unique_hits,
             shared_hits,
             boilerplate_hits,
+            field_hits: Vec::new(),
+            fields_matched: Vec::new(),
         });
         flagged = true;
     }
+    add_field_hits(postings, indexed, &mut evidence);
     // Deterministic ordering: strongest evidence first, then by item id.
     evidence.sort_unstable_by(|a, b| b.hits.cmp(&a.hits).then(a.item_id.cmp(&b.item_id)));
     (flagged, best_hits, evidence)
+}
+
+/// Fill `field_hits` / `fields_matched` of each evidence item: the item's
+/// matched n-grams counted per field of the item they occur in. Only the few
+/// evidence items are counted, in a second pass over the matched hashes.
+fn add_field_hits(postings: &ItemPostings, indexed: &HashSet<u64>, evidence: &mut [ItemHit]) {
+    if !postings.has_fields || evidence.is_empty() {
+        return;
+    }
+    let mut counts: HashMap<u32, [usize; 32]> = evidence
+        .iter()
+        .map(|hit| (hit.item_id, [0usize; 32]))
+        .collect();
+    for h in indexed.iter() {
+        let Some(items) = postings.hash_to_items.get(h) else {
+            continue;
+        };
+        for posting in items {
+            if let Some(per_field) = counts.get_mut(&posting.item) {
+                let mut mask = posting.fields;
+                while mask != 0 {
+                    per_field[mask.trailing_zeros() as usize] += 1;
+                    mask &= mask - 1;
+                }
+            }
+        }
+    }
+    for hit in evidence.iter_mut() {
+        let Some(per_field) = counts.get(&hit.item_id) else {
+            continue;
+        };
+        hit.field_hits = per_field
+            .iter()
+            .enumerate()
+            .filter(|&(_, &n)| n > 0)
+            .map(|(field, &n)| (field as u32, n))
+            .collect();
+        // Names only when the meta names every matched field, so the two lists
+        // line up.
+        hit.fields_matched = hit
+            .field_hits
+            .iter()
+            .map(|&(field, _)| postings.field_name(hit.item_id, field).map(str::to_string))
+            .collect::<Option<Vec<String>>>()
+            .unwrap_or_default();
+    }
 }
 
 /// The parts of a packed record: split on `sep`, or the whole text when `sep` is

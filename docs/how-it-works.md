@@ -44,7 +44,9 @@ from the Hugging Face Hub or from local `data_files`. It writes:
 - `index.native.attr`: for each hash, a 64-bit mask of the benchmarks it occurs in.
   This mask is why an index holds at most 64 benchmarks.
 - `index.native.items` (+ `.items.meta.json`): for each hash, the ids of the individual
-  items that contain it. Used for per-item attribution and the item gate.
+  items that contain it, and which of the item's fields it occurs in (each field is
+  hashed on its own). Used for per-item attribution, the item gate, and reporting
+  which fields of an item a document matched.
 - `index.native.sources.json` and `index.native.meta.json`: the benchmark legend and
   provenance (configs, dataset fingerprints, revisions, normalization hashes), plus
   per-benchmark item and n-gram counts.
@@ -97,6 +99,10 @@ Each shard is processed by one worker process, in this order:
    - **unique**: the n-gram belongs to just this item;
    - **shared**: it belongs to a few items;
    - **boilerplate**: it belongs to `>= --boilerplate-threshold` items (default 50).
+
+   and counted per field of the item (`field_hits`, named in `fields_matched`), which
+   tells a copy of the whole item (a question with its choices) from one of the
+   question alone.
 7. Every matched hash with its benchmark mask is written to `<shard>.hits.bin`. This is
    exhaustive, not sampled, and it is what `report` aggregates.
 

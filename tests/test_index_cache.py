@@ -10,10 +10,13 @@ import corpus_assay.config as config_mod
 import corpus_assay.services.index_cache as index_cache
 from corpus_assay.benchmark_registry import BenchmarkRegistry
 from corpus_assay.benchmark_spec import BenchmarkSpec
+from corpus_assay.formats import FileType, write_header
 from corpus_assay.services.index_cache import (
     benchmark_specs_hash,
     ensure_native_index,
     index_cache_path,
+    native_index_ready,
+    native_sidecar,
 )
 
 
@@ -29,6 +32,29 @@ def _registry(fields: list[str]) -> BenchmarkRegistry:
             )
         }
     )
+
+
+def _write_fake_index(
+    native: Path, *, items_type: FileType = FileType.ITEM_POSTINGS_V2
+) -> None:
+    """Placeholder files for every required path; `.items` gets a real header."""
+    for path in index_cache.native_index_required_paths(native, require_items=True):
+        path.write_text("x", encoding="utf-8")
+    with native_sidecar(native, ".items").open("wb") as f:
+        write_header(f, file_type=items_type, ngram_n=13, record_count=0)
+
+
+def test_cache_with_v1_item_postings_is_not_ready(tmp_path: Path) -> None:
+    """A cache built before field masks (`.items` v1) is rebuilt."""
+    native = tmp_path / "index.native"
+    _write_fake_index(native)
+    assert native_index_ready(native)
+    _write_fake_index(native, items_type=FileType.ITEM_POSTINGS)
+    assert not native_index_ready(native)
+    # The item table is required too.
+    _write_fake_index(native)
+    native_sidecar(native, ".items.meta.json").unlink()
+    assert not native_index_ready(native)
 
 
 def test_cache_key_changes_when_a_registry_entry_changes(
@@ -68,10 +94,7 @@ def test_ensure_native_index_does_not_reuse_a_stale_cache(
 
     def fake_build(cfg) -> None:
         built.append(cfg.out_path)
-        for path in index_cache.native_index_required_paths(
-            Path(cfg.out_path), require_items=True
-        ):
-            path.write_text("x", encoding="utf-8")
+        _write_fake_index(Path(cfg.out_path))
 
     monkeypatch.setattr(index_cache, "build_index_hf", fake_build)
 

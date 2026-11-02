@@ -21,7 +21,7 @@ from corpus_assay.benchmark_registry import REGISTRY
 from corpus_assay.benchmark_spec import BenchmarkSpec
 from corpus_assay.benchmarks import BenchmarkLoader, BenchmarkLoadStatus
 from corpus_assay.config import BuildIndexConfig
-from corpus_assay.constants import INDEX_FORMAT_VERSION
+from corpus_assay.constants import FIELD_SEPARATOR, INDEX_FORMAT_VERSION
 from corpus_assay.formats import FileType, write_header
 from corpus_assay.inspect import format_benchmark_table
 from corpus_assay.normalization import active_ngram_config_path
@@ -107,6 +107,22 @@ def _collect_unique_hashes(
     return hashes
 
 
+def _positive_fields(loader: BenchmarkLoader) -> Iterator[list[str]]:
+    """Each positive item as its field texts (one per spec field, in order).
+
+    Loaders without ``load_positive_fields`` (test doubles) yield joined text;
+    its ``FIELD_SEPARATOR``-separated parts are taken as the fields in order.
+    """
+    by_fields: Callable[[], Iterable[list[str]]] | None = getattr(
+        loader, "load_positive_fields", None
+    )
+    if by_fields is not None:
+        yield from by_fields()
+        return
+    for text in loader.load_positive():
+        yield [part.strip() for part in text.split(FIELD_SEPARATOR)]
+
+
 @dataclass
 class BenchmarkBuildStats:
     """What one benchmark contributed to the index."""
@@ -182,16 +198,22 @@ def build_index(
         # stream positives and add directly (lower peak memory). Each positive
         # text is one protected evaluation item; record per-item postings so the
         # scanner can gate on single-item overlap (not benchmark-wide aggregation).
+        # Each field is hashed on its own (n-grams never cross fields anyway), so
+        # every posting records which of the spec's fields the n-gram occurs in.
         first_item = len(attribution.items_meta)
-        for text in tqdm(loader.load_positive(), desc=f"{spec.name} [Index]"):
+        attribution.set_benchmark_fields(spec.name, list(spec.fields))
+        for fields in tqdm(_positive_fields(loader), desc=f"{spec.name} [Index]"):
             item_idx = attribution.register_item(spec.name)
-            toks = normalize_text(text)
-            for ng in _iter_filtered_ngrams(toks, ngram, stats):
-                h = hash_ngram(ng)
-                if h in neg:
+            for field_idx, text in enumerate(fields):
+                if not text:
                     continue
-                attribution.add_hash_for_source(h, spec.name)
-                attribution.add_hash_for_item(h, item_idx)
+                toks = normalize_text(text)
+                for ng in _iter_filtered_ngrams(toks, ngram, stats):
+                    h = hash_ngram(ng)
+                    if h in neg:
+                        continue
+                    attribution.add_hash_for_source(h, spec.name)
+                    attribution.add_hash_for_item(h, item_idx, field_idx)
         dataset_fingerprints.extend(getattr(loader, "dataset_fingerprints", []))
         item_ranges.append((first_item, len(attribution.items_meta)))
         status = getattr(loader, "load_status", None)

@@ -1,3 +1,4 @@
+import json
 import struct
 from collections import defaultdict
 from typing import Dict, Iterator
@@ -5,6 +6,24 @@ from typing import Dict, Iterator
 from pydantic import BaseModel, Field
 
 from corpus_assay import formats
+
+# Format version of `<index>.items` written by this version (see
+# ``AttributionIndex.write_items_sidecar``); version 1 sidecars are still read.
+ITEMS_FORMAT_VERSION = 2
+
+_ITEMS_FILE_TYPES = {
+    int(formats.FileType.ITEM_POSTINGS): 1,
+    int(formats.FileType.ITEM_POSTINGS_V2): 2,
+}
+
+
+def _items_version_of(header: formats.BinaryHeader, path: str) -> int:
+    version = _ITEMS_FILE_TYPES.get(header.file_type)
+    if version is None:
+        raise ValueError(
+            f"{path} has file type {header.file_type}, not an item-postings sidecar."
+        )
+    return version
 
 
 class AttributionLegend(BaseModel):
@@ -19,6 +38,8 @@ class AttributionIndex:
     """Centralize attribution sidecar, legend, and mask utilities."""
 
     MAX_SOURCES = 64
+    # Width of the per-posting field mask in the `.items` v2 sidecar.
+    MAX_ITEM_FIELDS = 32
     ATTR_FILE_TYPE = formats.FileType.ATTR_MASKS
     HITS_FILE_TYPE = formats.FileType.HITS_PAIRS
 
@@ -27,11 +48,14 @@ class AttributionIndex:
         self.name_to_id: dict[str, int] = {}
         self.id_to_name: list[str] = []
         self.hash2mask: dict[int, int] = {}
-        # Item-level postings: hash -> set of protected-item indices, plus
-        # per-item metadata (benchmark, item_id, distinct hash count). Populated
-        # only when the builder tracks items; enables item-level scan gating.
-        self.hash2items: dict[int, set[int]] = {}
+        # Item-level postings: hash -> {protected-item index: field mask}, plus
+        # per-item metadata (benchmark, item_id, distinct hash count) and each
+        # benchmark's field names. Populated only when the builder tracks items;
+        # enables item-level scan gating. Bit k of a field mask is set when the
+        # hash occurs in the k-th field of the item's benchmark spec.
+        self.hash2items: dict[int, dict[int, int]] = {}
         self.items_meta: list[dict] = []
+        self.benchmark_fields: dict[str, list[str]] = {}
 
     def register_item(self, benchmark: str, item_id: str | None = None) -> int:
         """Register a protected evaluation item, returning its integer index."""
@@ -45,12 +69,22 @@ class AttributionIndex:
         )
         return idx
 
-    def add_hash_for_item(self, hash_value: int, item_idx: int) -> None:
-        """Record that ``hash_value`` occurs in protected item ``item_idx``."""
-        bucket = self.hash2items.setdefault(hash_value, set())
+    def set_benchmark_fields(self, benchmark: str, fields: list[str]) -> None:
+        """Record the field names (spec order) a benchmark's field ids refer to."""
+        self.benchmark_fields[benchmark] = list(fields)
+
+    def add_hash_for_item(self, hash_value: int, item_idx: int, field: int = 0) -> None:
+        """Record that ``hash_value`` occurs in field ``field`` of item ``item_idx``.
+
+        Fields past the last mask bit share bit ``MAX_ITEM_FIELDS - 1``.
+        """
+        bucket = self.hash2items.setdefault(hash_value, {})
+        bit = 1 << min(max(field, 0), self.MAX_ITEM_FIELDS - 1)
         if item_idx not in bucket:
-            bucket.add(item_idx)
+            bucket[item_idx] = bit
             self.items_meta[item_idx]["n_protected_hashes"] += 1
+        else:
+            bucket[item_idx] |= bit
 
     def get_source_id(self, name: str) -> int:
         """Return the numeric source id for a name, registering if needed."""
@@ -95,46 +129,66 @@ class AttributionIndex:
     def write_items_sidecar(self, base_path: str, *, ngram: int | None = None) -> str:
         """Write the item-postings sidecar (`<base>.items`) + metadata JSON.
 
-        Record layout (after the standard format header): for each hash, sorted
-        ascending, ``<u64 hash, u32 n_items, n_items × u32 item_idx>``. The paired
-        ``<base>.items.meta.json`` carries the per-item ``(benchmark, item_id,
-        n_protected_hashes)`` table so reports can name the specific leaked items.
+        Record layout (format v2, file type ``ITEM_POSTINGS_V2``, after the
+        standard format header): for each hash, sorted ascending, ``<u64 hash, u32
+        n_items, n_items × (u32 item_idx, u32 field_mask)>``, postings sorted by
+        item. The paired ``<base>.items.meta.json`` carries the per-item
+        ``(benchmark, item_id, n_protected_hashes)`` table, so reports can name the
+        leaked items, and each benchmark's field names, which the field-mask bits
+        index.
         """
         items_path = base_path + ".items"
         with open(items_path, "wb") as bf:
             formats.write_header(
                 bf,
-                file_type=formats.FileType.ITEM_POSTINGS,
+                file_type=formats.FileType.ITEM_POSTINGS_V2,
                 ngram_n=ngram or 0,
                 record_count=len(self.hash2items),
             )
             for h in sorted(self.hash2items):
-                ids = sorted(self.hash2items[h])
+                postings = self.hash2items[h]
+                ids = sorted(postings)
                 bf.write(struct.pack("<QI", h, len(ids)))
                 if ids:
-                    bf.write(struct.pack(f"<{len(ids)}I", *ids))
+                    flat = [v for it in ids for v in (it, postings[it])]
+                    bf.write(struct.pack(f"<{len(flat)}I", *flat))
 
         meta_path = base_path + ".items.meta.json"
-        import json
-
         with open(meta_path, "w", encoding="utf-8") as mf:
             json.dump(
-                {"n_items": len(self.items_meta), "items": self.items_meta},
+                {
+                    "format_version": ITEMS_FORMAT_VERSION,
+                    "n_items": len(self.items_meta),
+                    "fields": self.benchmark_fields,
+                    "items": self.items_meta,
+                },
                 mf,
                 indent=2,
             )
         return items_path
 
     @staticmethod
-    def read_items_sidecar(path: str) -> Iterator[tuple[int, list[int]]]:
-        """Yield ``(hash, [item_idx, ...])`` records from an item-postings sidecar."""
-        head = struct.calcsize("<QI")
+    def items_sidecar_version(path: str) -> int:
+        """Format version (1 or 2) of an item-postings sidecar."""
         with open(path, "rb") as f:
-            header = formats.read_header_optional(
-                f, expected_file_type=formats.FileType.ITEM_POSTINGS
-            )
+            header = formats.read_header_optional(f)
+        if header is None:
+            raise ValueError(f"{path} is missing an item-postings header.")
+        return _items_version_of(header, path)
+
+    @staticmethod
+    def read_item_postings(path: str) -> Iterator[tuple[int, list[tuple[int, int]]]]:
+        """Yield ``(hash, [(item_idx, field_mask), ...])`` from an item sidecar.
+
+        Reads format v1 (no field information: every mask is 0) and v2.
+        """
+        with open(path, "rb") as f:
+            header = formats.read_header_optional(f)
             if header is None:
                 raise ValueError(f"{path} is missing an item-postings header.")
+            version = _items_version_of(header, path)
+            words = 2 if version == 2 else 1
+            head = struct.calcsize("<QI")
             for _ in range(header.record_count):
                 chunk = f.read(head)
                 if len(chunk) != head:
@@ -145,11 +199,25 @@ class AttributionIndex:
                     raise ValueError(
                         f"Unreasonably large item count ({n_items}) in {path}."
                     )
-                ids_chunk = f.read(4 * n_items)
-                if len(ids_chunk) != 4 * n_items:
+                size = 4 * words * n_items
+                ids_chunk = f.read(size)
+                if len(ids_chunk) != size:
                     raise ValueError(f"Truncated item-id list in {path}.")
-                ids = list(struct.unpack(f"<{n_items}I", ids_chunk)) if n_items else []
-                yield h, ids
+                values = (
+                    struct.unpack(f"<{words * n_items}I", ids_chunk) if n_items else ()
+                )
+                if words == 2:
+                    yield h, list(zip(values[0::2], values[1::2]))
+                else:
+                    yield h, [(it, 0) for it in values]
+            if f.read(1):
+                raise ValueError(f"Unexpected trailing data in {path}.")
+
+    @staticmethod
+    def read_items_sidecar(path: str) -> Iterator[tuple[int, list[int]]]:
+        """Yield ``(hash, [item_idx, ...])`` records from an item-postings sidecar."""
+        for h, postings in AttributionIndex.read_item_postings(path):
+            yield h, [it for it, _mask in postings]
 
     def per_source_totals(self) -> Dict[int, int]:
         """Return unique hash counts per source id from the current map."""
@@ -220,4 +288,4 @@ class AttributionIndex:
                 yield struct.unpack("<QQ", chunk)
 
 
-__all__ = ["AttributionIndex", "AttributionLegend"]
+__all__ = ["ITEMS_FORMAT_VERSION", "AttributionIndex", "AttributionLegend"]

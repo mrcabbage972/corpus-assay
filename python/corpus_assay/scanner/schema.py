@@ -69,6 +69,10 @@ class ItemHit(BaseModel):
     unique_hits: int = Field(default=0, ge=0)
     shared_hits: int = Field(default=0, ge=0)
     boilerplate_hits: int = Field(default=0, ge=0)
+    # v3, with an `.items` v2 sidecar: `[field_idx, hits]` for each of the item's
+    # spec fields with a hit, and those fields' names (when the index lists them).
+    field_hits: list[tuple[int, int]] = Field(default_factory=list)
+    fields_matched: list[str] = Field(default_factory=list)
 
 
 class ContaminationRecord(BaseModel):

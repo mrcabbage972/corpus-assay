@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from corpus_assay.attribution import AttributionIndex
 from corpus_assay.config import ScanConfig
 from corpus_assay.scanner.fingerprint import library_version
+from corpus_assay.scanner.io import parse_contamination_record
 from corpus_assay.scanner.layout import OutputLayout
 from corpus_assay.scanner.schema import ScanSummary
 from corpus_assay.schemas import RunStopGramsInfo
@@ -113,6 +114,25 @@ class LeakByItemRow(BaseModel):
     leaked_boilerplate: int
 
 
+class FieldMatchSummary(BaseModel):
+    """Which fields of an item the sampled records matched (``.items`` v2 only).
+
+    Counts (record, item) evidence pairs from ``contaminated_docs/`` (a sample
+    unless the scan wrote every record). An item's fields are those of its spec
+    fields that hold at least one indexed n-gram. ``full``: every such field
+    matched (e.g. the question and its choices). ``question_only``: only the
+    first spec field matched. ``partial``: some other subset. ``single_field``:
+    the item has n-grams in only one field, so the split does not apply.
+    """
+
+    records: int = 0
+    item_matches: int = 0
+    full: int = 0
+    question_only: int = 0
+    partial: int = 0
+    single_field: int = 0
+
+
 class ShardLeakRow(BaseModel):
     shard: str
     hits_file: str
@@ -164,6 +184,9 @@ class ReportPayload(BaseModel):
     # Exact per-item leak, populated when the index has an `.items` sidecar; empty
     # otherwise. Ordered by leak fraction descending.
     leak_by_item: list[LeakByItemRow] = Field(default_factory=list)
+    # Full-item vs question-only matches among the sampled records; None when
+    # the index's `.items` sidecar has no field masks (format v1) or is missing.
+    field_matches: FieldMatchSummary | None = None
     bad_shards: BadShards
     examples: ExamplesSection
     warnings: list[str]
@@ -491,6 +514,60 @@ def _build_leak_by_item(
     return rows
 
 
+def _build_field_matches(
+    layout: OutputLayout, *, index_path: Path
+) -> FieldMatchSummary | None:
+    items_path = _index_sidecar(index_path, ".items")
+    if not items_path.exists():
+        return None
+    if AttributionIndex.items_sidecar_version(str(items_path)) < 2:
+        return None
+
+    summary = FieldMatchSummary()
+    matches: list[tuple[int, set[int]]] = []
+    for path in sorted(layout.contaminated_dir.glob("*.ndjson")):
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    record = parse_contamination_record(line)
+                except ValueError:
+                    continue  # not a scanner record; `inspect-run` validates them
+                summary.records += 1
+                for hit in record.item_hits:
+                    matched = {field for field, hits in hit.field_hits if hits > 0}
+                    if matched:
+                        matches.append((hit.item_id, matched))
+    if not matches:
+        return summary
+
+    # The fields each matched item has n-grams in, from the static postings.
+    wanted = {item for item, _ in matches}
+    item_fields: dict[int, int] = defaultdict(int)
+    for _hash, postings in AttributionIndex.read_item_postings(str(items_path)):
+        for item, mask in postings:
+            if item in wanted:
+                item_fields[item] |= mask
+
+    for item, matched in matches:
+        fields = {
+            bit
+            for bit in range(AttributionIndex.MAX_ITEM_FIELDS)
+            if item_fields[item] >> bit & 1
+        }
+        summary.item_matches += 1
+        if len(fields) < 2:
+            summary.single_field += 1
+        elif fields <= matched:
+            summary.full += 1
+        elif matched == {0}:
+            summary.question_only += 1
+        else:
+            summary.partial += 1
+    return summary
+
+
 def _build_bad_shards(
     *,
     shard_rows: list[ShardLeakRow],
@@ -653,6 +730,25 @@ def _render_markdown_report(
             [
                 "",
                 "See `leak_by_item.csv` for the full table.",
+                "",
+            ]
+        )
+
+    if report.field_matches is not None and report.field_matches.item_matches:
+        fm = report.field_matches
+        lines.extend(
+            [
+                "## Item fields matched (sampled records)",
+                "",
+                f"Of {fm.item_matches} item matches in {fm.records} sampled records: "
+                "full items (every field with n-grams matched, e.g. question and "
+                "choices), question-only matches (only the first field), other "
+                "partial matches, and items with n-grams in one field only.",
+                "",
+                "| Full item | Question only | Partial | Single-field item |",
+                "| --- | --- | --- | --- |",
+                f"| {fm.full} | {fm.question_only} | {fm.partial} | "
+                f"{fm.single_field} |",
                 "",
             ]
         )
@@ -908,6 +1004,7 @@ def generate_report_from_scan_dir(
     )
 
     examples = _build_examples(layout, scan_dir=scan_dir_path)
+    field_matches = _build_field_matches(layout, index_path=index_path)
 
     warnings: list[str] = []
 
@@ -935,6 +1032,7 @@ def generate_report_from_scan_dir(
         scan_summary=scan_summary,
         leak_by_benchmark=leak_by_benchmark,
         leak_by_item=leak_by_item,
+        field_matches=field_matches,
         bad_shards=bad_shards,
         examples=examples,
         warnings=warnings,
