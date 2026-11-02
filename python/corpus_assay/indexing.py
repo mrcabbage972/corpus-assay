@@ -19,9 +19,18 @@ from corpus_assay._native import (
 from corpus_assay.attribution import AttributionIndex
 from corpus_assay.benchmark_registry import REGISTRY
 from corpus_assay.benchmark_spec import BenchmarkSpec
-from corpus_assay.benchmarks import BenchmarkLoader, BenchmarkLoadStatus
+from corpus_assay.benchmarks import (
+    BenchmarkLoader,
+    BenchmarkLoadStatus,
+    FieldValue,
+    field_text,
+)
 from corpus_assay.config import BuildIndexConfig, ItemStopGramsConfig
-from corpus_assay.constants import FIELD_SEPARATOR, INDEX_FORMAT_VERSION
+from corpus_assay.constants import (
+    FIELD_SEPARATOR,
+    INDEX_FORMAT_VERSION,
+    ITEMS_TEXT_SUFFIX,
+)
 from corpus_assay.formats import FileType, write_header
 from corpus_assay.inspect import format_benchmark_table
 from corpus_assay.normalization import active_ngram_config_path
@@ -108,13 +117,16 @@ def _collect_unique_hashes(
     return hashes
 
 
-def _positive_fields(loader: BenchmarkLoader) -> Iterator[list[str]]:
-    """Each positive item as its field texts (one per spec field, in order).
+def _positive_fields(loader: BenchmarkLoader) -> Iterator[list[FieldValue]]:
+    """Each positive item as its fields (one per spec field, in order).
+
+    A field is its text, or a list of texts for a list-valued field (see
+    ``benchmarks._field_values``).
 
     Loaders without ``load_positive_fields`` (test doubles) yield joined text;
     its ``FIELD_SEPARATOR``-separated parts are taken as the fields in order.
     """
-    by_fields: Callable[[], Iterable[list[str]]] | None = getattr(
+    by_fields: Callable[[], Iterable[list[FieldValue]]] | None = getattr(
         loader, "load_positive_fields", None
     )
     if by_fields is not None:
@@ -180,6 +192,8 @@ class BuildIndexResult:
     dataset_fingerprints: list[dict[str, object]]
     benchmark_stats: list[BenchmarkBuildStats] = field(default_factory=list)
     item_stopgrams: ItemStopGramsResult | None = None
+    # Raw fields of every registered item, by item index (the item text sidecar).
+    item_texts: list[list[FieldValue]] = field(default_factory=list)
 
 
 def build_index(
@@ -209,6 +223,7 @@ def build_index(
     dataset_fingerprints: list[dict[str, object]] = []
     benchmark_stats: list[BenchmarkBuildStats] = []
     item_ranges: list[tuple[int, int]] = []
+    item_texts: list[list[FieldValue]] = []
 
     for spec in benchmarks:
         benchmark_specs.append(_benchmark_spec_meta(spec))
@@ -230,7 +245,9 @@ def build_index(
         attribution.set_benchmark_fields(spec.name, list(spec.fields))
         for fields in tqdm(_positive_fields(loader), desc=f"{spec.name} [Index]"):
             item_idx = attribution.register_item(spec.name)
-            for field_idx, text in enumerate(fields):
+            item_texts.append(list(fields))
+            for field_idx, value in enumerate(fields):
+                text = field_text(value)
                 if not text:
                     continue
                 toks = normalize_text(text)
@@ -299,6 +316,7 @@ def build_index(
         dataset_fingerprints=dataset_fingerprints,
         benchmark_stats=benchmark_stats,
         item_stopgrams=stop_result,
+        item_texts=item_texts,
     )
 
 
@@ -437,6 +455,9 @@ def write_native_index_artifacts(result: BuildIndexResult, out_path: str) -> Non
     if has_items:
         meta["files"]["items"] = f"{Path(out_path).name}.items"
         meta["files"]["items_meta"] = f"{Path(out_path).name}.items.meta.json"
+    text_name = f"{Path(out_path).name}{ITEMS_TEXT_SUFFIX}"
+    if result.item_texts:
+        meta["files"]["items_text"] = text_name
 
     IndexMeta.model_validate(meta)
     with open(meta_path, "w", encoding="utf-8") as f:
@@ -447,11 +468,38 @@ def write_native_index_artifacts(result: BuildIndexResult, out_path: str) -> Non
     result.attribution.write_legend(out_path, per_source_total)
     if has_items:
         result.attribution.write_items_sidecar(out_path, ngram=result.ngram)
+    text_path = Path(out_path).with_name(text_name)
+    if result.item_texts:
+        write_item_texts(text_path, result)
+    else:
+        text_path.unlink(missing_ok=True)  # from an earlier build at this path
     stop_path = Path(out_path).with_name(stop_name)
     if result.item_stopgrams is not None:
         _write_item_stopgrams(stop_path, result.item_stopgrams, ngram=result.ngram)
     else:
         stop_path.unlink(missing_ok=True)  # from an earlier build at this path
+
+
+def write_item_texts(path: Path, result: BuildIndexResult) -> None:
+    """Write the item text sidecar (``<index>.items.text.jsonl``).
+
+    One line per item, in item order: ``{item_idx, benchmark, item_id, fields}``,
+    where ``fields`` holds the raw (not normalized) text of each spec field in
+    spec order, ``""`` when empty, or a list of strings for a list-valued field
+    (each multiple-choice option on its own). The exact-match channel reads it.
+    """
+    items_meta = result.attribution.items_meta
+    with path.open("w", encoding="utf-8") as f:
+        for idx, fields in enumerate(result.item_texts):
+            meta = items_meta[idx] if idx < len(items_meta) else {}
+            line = {
+                "item_idx": idx,
+                "benchmark": meta.get("benchmark"),
+                "item_id": meta.get("item_id"),
+                "fields": fields,
+            }
+            f.write(json.dumps(line, ensure_ascii=False))
+            f.write("\n")
 
 
 def _write_item_stopgrams(
@@ -523,7 +571,8 @@ def _report_build_stats(
         min_hits = result.benchmark_stats[0].min_hits
         print(
             f"  {unflaggable:,} item(s) have fewer than min_hits={min_hits} n-grams; "
-            "the n-gram rule cannot flag them."
+            "the n-gram rule cannot flag them (scan with --exact-channel short to "
+            "match them verbatim)."
         )
     stop = result.item_stopgrams
     if stop is not None:

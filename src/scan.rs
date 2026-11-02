@@ -1,3 +1,7 @@
+use crate::exact::{
+    choices_near, find_bounded, get_exact_matcher, get_item_texts, items_text_exists,
+    items_text_path, ExactMatcher, ExactMode, ItemTexts,
+};
 use crate::formats::{write_header, FileType};
 use crate::index::{get_attr_index, get_hash_index, get_index_ngram};
 use crate::items_index::{get_items_index, items_sidecar_exists, ItemPostings};
@@ -5,8 +9,8 @@ use crate::mmap_index::MmapAttrIndex;
 use crate::spaced::{load_spaced_cached, SpacedIndex};
 use crate::stopgrams::StopGramsSet;
 use crate::text::{
-    doc_identity_rust, get_word_re, hash_ngram_text, join_ngram_window, ngram_allowed_rust,
-    normalize_text_rust, FIELD_SEPARATOR,
+    doc_identity_rust, get_word_re, hash_ngram_text, join_ngram_window, light_normalize_rust,
+    ngram_allowed_rust, normalize_text_rust, FIELD_SEPARATOR,
 };
 use arrow::array::{ArrayRef, AsArray, RecordBatchReader};
 use arrow::buffer::NullBuffer;
@@ -17,7 +21,7 @@ use once_cell::sync::Lazy;
 use parquet::file::reader::ChunkReader;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyString};
+use pyo3::types::{PyAny, PyDict, PyString};
 use regex::Regex;
 
 use arrow::array::{Array, StringArray};
@@ -31,6 +35,30 @@ use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+
+/// Evidence from the item's raw text (`.items.text.jsonl`), computed for the
+/// records written when the exact channel is on.
+///
+/// `choices_found` / `choices_total`: the item's other fields (each element of
+/// a list field separately) found within 1,000 characters of the matched
+/// question.
+#[derive(Serialize, Clone, Default)]
+struct TextEvidence {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    choices_found: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    choices_total: Option<usize>,
+}
+
+/// An exact-channel match: the item's question (field 0) occurs verbatim, after
+/// light normalization and on word boundaries, in the sub-document.
+#[derive(Serialize)]
+struct ExactHit {
+    item_id: u32,
+    field: u32,
+    #[serde(flatten)]
+    text: TextEvidence,
+}
 
 /// Per-item attribution evidence for one flagged document. `hits` is the number
 /// of distinct index n-grams matching the protected item; it partitions into
@@ -60,11 +88,14 @@ struct ItemHit {
     field_hits: Vec<(u32, usize)>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     fields_matched: Vec<String>,
+    #[serde(flatten)]
+    text: TextEvidence,
 }
 
 /// Version of the flagged-document records (`FileScanResult`); mirrored by
 /// `DOC_RESULT_SCHEMA_VERSION` in `python/corpus_assay/schemas/doc_result.py`.
-/// v3 adds `field`, `role` and `turn`.
+/// v3 adds `field`, `role` and `turn`; later optional v3 fields: item coverage
+/// and field hits, `exact_hits`, `channels`, and the text evidence.
 const DOC_RESULT_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Serialize)]
@@ -80,9 +111,14 @@ struct FileScanResult<'a> {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     item_hits: Vec<ItemHit>,
     /// Protected item id that the spaced channel verified against, when the document was
-    /// flagged by the spaced channel rather than the exact gate. `None` for exact flags.
+    /// flagged by the spaced channel rather than the n-gram gate.
     #[serde(skip_serializing_if = "Option::is_none")]
     spaced_item: Option<u32>,
+    /// Exact-channel matches (only with the exact channel on).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    exact_hits: Vec<ExactHit>,
+    /// The channels that flagged the sub-document: `ngram`, `spaced`, `exact`.
+    channels: Vec<&'static str>,
     /// Column the sub-document came from: a text key, or the messages key.
     #[serde(skip_serializing_if = "Option::is_none")]
     field: Option<&'a str>,
@@ -105,7 +141,8 @@ enum GateMode {
     Item,
 }
 
-type ScanOutput = (usize, usize, Vec<String>, usize);
+/// `(scanned, contaminated, records, empty_after_filter, flagged per channel)`.
+type ScanOutput = (usize, usize, Vec<String>, usize, [usize; 3]);
 
 static STOPGRAM_CACHE: Lazy<Mutex<HashMap<String, Arc<StopGramsSet>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
@@ -156,6 +193,17 @@ struct PreparedScan {
     /// Optional spaced-seed recall channel: a doc is flagged when the exact gate fires
     /// OR the spaced verifier matches (union recall). `None` disables the channel.
     spaced: Option<Arc<SpacedIndex>>,
+    /// Item text channels (exact match, choices); `None` unless the exact
+    /// channel is on.
+    text: Option<TextChannels>,
+}
+
+/// The item text and what to do with it.
+#[derive(Clone)]
+struct TextChannels {
+    texts: Arc<ItemTexts>,
+    /// The exact-match automaton (`None`: exact channel off).
+    matcher: Option<Arc<ExactMatcher>>,
 }
 
 #[derive(Clone)]
@@ -344,6 +392,7 @@ fn item_verdict(
             item_coverage,
             field_hits: Vec::new(),
             fields_matched: Vec::new(),
+            text: TextEvidence::default(),
         });
     }
     add_field_hits(postings, indexed, &mut verdict.evidence);
@@ -432,7 +481,31 @@ struct Flag {
     src_hits: Vec<(u32, usize)>,
     item_hits: Vec<ItemHit>,
     spaced_item: Option<u32>,
+    /// The n-gram gate flagged the sub-document.
+    ngram: bool,
+    /// Exact-channel matches: `(item, start, end)` in the light-normalized text.
+    exact: Vec<(u32, usize, usize)>,
 }
+
+impl Flag {
+    fn channels(&self) -> Vec<&'static str> {
+        let mut channels = Vec::with_capacity(2);
+        if self.ngram {
+            channels.push(CHANNEL_NGRAM);
+        }
+        if self.spaced_item.is_some() {
+            channels.push(CHANNEL_SPACED);
+        }
+        if !self.exact.is_empty() {
+            channels.push(CHANNEL_EXACT);
+        }
+        channels
+    }
+}
+
+const CHANNEL_NGRAM: &str = "ngram";
+const CHANNEL_SPACED: &str = "spaced";
+const CHANNEL_EXACT: &str = "exact";
 
 enum SubDocOutcome {
     /// Empty or shorter than `2·n` bytes: not counted as scanned.
@@ -457,11 +530,65 @@ struct Scorer {
     indexed: HashSet<u64>,
     per_item_hits: HashMap<u32, (usize, usize, usize)>,
     item_run_state: HashMap<u32, (i64, usize, usize)>,
+    /// Distinct index hits of the last sub-document (0 when not counted).
+    distinct_hits: usize,
+    /// Light-normalized text of the last sub-document, when `light_ready`.
+    light: String,
+    light_ready: bool,
 }
 
 impl Scorer {
+    /// Score a sub-document: the n-gram gate (and the spaced channel), then the
+    /// exact channel when it is on. An exact match flags the sub-document
+    /// whatever the n-gram gate decided.
     fn score(&mut self, cfg: &PreparedScan, re: &'static Regex, sub_text: &str) -> SubDocOutcome {
+        self.light_ready = false;
+        let outcome = self.score_ngram(cfg, re, sub_text);
+        let Some(matcher) = cfg.text.as_ref().and_then(|t| t.matcher.as_ref()) else {
+            return outcome;
+        };
+        if sub_text.is_empty() {
+            return outcome;
+        }
+        let exact = matcher.find(self.light_text(sub_text));
+        if exact.is_empty() {
+            return outcome;
+        }
+        match outcome {
+            SubDocOutcome::Flagged(mut flag) => {
+                flag.exact = exact;
+                SubDocOutcome::Flagged(flag)
+            }
+            _ => SubDocOutcome::Flagged(Flag {
+                match_count: self.distinct_hits,
+                src_hits: self.hits_by_src.drain().filter(|&(_, v)| v > 0).collect(),
+                item_hits: Vec::new(),
+                spaced_item: None,
+                ngram: false,
+                exact,
+            }),
+        }
+    }
+
+    /// The light-normalized text of `sub_text` (the sub-document just scored),
+    /// computed once.
+    fn light_text(&mut self, sub_text: &str) -> &str {
+        if !self.light_ready {
+            self.light = light_normalize_rust(sub_text);
+            self.light_ready = true;
+        }
+        &self.light
+    }
+
+    fn score_ngram(
+        &mut self,
+        cfg: &PreparedScan,
+        re: &'static Regex,
+        sub_text: &str,
+    ) -> SubDocOutcome {
         self.per_item_hits.clear();
+        self.hits_by_src.clear();
+        self.distinct_hits = 0;
         if sub_text.is_empty() || (sub_text.len() < cfg.n * 2) {
             return SubDocOutcome::Skipped;
         }
@@ -521,6 +648,7 @@ impl Scorer {
                 *self.matched_hash_to_mask.entry(*h).or_insert(0) |= mask;
             }
         }
+        self.distinct_hits = distinct_hits;
 
         // Decide flag + per-item evidence according to the gate mode.
         let union_flag = distinct_hits >= cfg.item_gate.min_hits
@@ -589,9 +717,52 @@ impl Scorer {
             match_count,
             src_hits,
             item_hits,
+            ngram: spaced_item.is_none(),
             spaced_item,
+            exact: Vec::new(),
         })
     }
+}
+
+/// Fill the text evidence of a written record: choices near the question for
+/// every n-gram item hit and exact hit.
+/// `light` is the sub-document's light-normalized text.
+///
+/// The question's location is the exact match when there is one; for an n-gram
+/// item hit, the first word-bounded verbatim occurrence of the question, else
+/// unknown (the choices are then looked for in the whole sub-document).
+fn text_evidence(
+    text: &TextChannels,
+    light: &str,
+    item_hits: &mut [ItemHit],
+    exact: &[(u32, usize, usize)],
+) -> Vec<ExactHit> {
+    let evidence = |item: u32, span: Option<(usize, usize)>| -> TextEvidence {
+        let Some(item_text) = text.texts.get(item) else {
+            return TextEvidence::default();
+        };
+        let span = span.or_else(|| find_bounded(light, 0, light.len(), &item_text.question));
+        let (found, total) = choices_near(item_text, light, span);
+        TextEvidence {
+            choices_found: Some(found),
+            choices_total: Some(total),
+        }
+    };
+    for hit in item_hits.iter_mut() {
+        let span = exact
+            .iter()
+            .find(|&&(item, _, _)| item == hit.item_id)
+            .map(|&(_, s, e)| (s, e));
+        hit.text = evidence(hit.item_id, span);
+    }
+    exact
+        .iter()
+        .map(|&(item, start, end)| ExactHit {
+            item_id: item,
+            field: 0,
+            text: evidence(item, Some((start, end))),
+        })
+        .collect()
 }
 
 /// The best single-document hold on one item within a shard.
@@ -659,6 +830,9 @@ struct ShardScan<'c> {
     scanned: usize,
     contaminated: usize,
     empty_after_filter: usize,
+    /// Flagged sub-documents per channel: n-gram, spaced, exact (a sub-document
+    /// flagged by several channels counts in each).
+    by_channel: [usize; 3],
     results: Vec<String>,
     /// Per item: the most hits one sub-document had, and that sub-document's id
     /// (only when `cfg.track_item_best`).
@@ -697,6 +871,9 @@ impl ShardScan<'_> {
             };
             self.scanned += 1;
             self.contaminated += 1;
+            self.by_channel[0] += usize::from(flag.ngram);
+            self.by_channel[1] += usize::from(flag.spaced_item.is_some());
+            self.by_channel[2] += usize::from(!flag.exact.is_empty());
             if self
                 .limits
                 .max_return_records
@@ -704,6 +881,17 @@ impl ShardScan<'_> {
             {
                 continue;
             }
+            let channels = flag.channels();
+            let mut item_hits = flag.item_hits;
+            let exact_hits = match cfg.text.as_ref() {
+                Some(text) => text_evidence(
+                    text,
+                    self.scorer.light_text(sub_text),
+                    &mut item_hits,
+                    &flag.exact,
+                ),
+                None => Vec::new(),
+            };
             let rec = FileScanResult {
                 schema_version: DOC_RESULT_SCHEMA_VERSION,
                 doc_id: sub_doc_id(
@@ -716,8 +904,10 @@ impl ShardScan<'_> {
                 ),
                 match_count: flag.match_count,
                 src_hits: flag.src_hits,
-                item_hits: flag.item_hits,
+                item_hits,
                 spaced_item: flag.spaced_item,
+                exact_hits,
+                channels,
                 field: Some(seg.field),
                 role: seg.role,
                 turn: seg.turn,
@@ -973,6 +1163,7 @@ where
         scanned: 0,
         contaminated: 0,
         empty_after_filter: 0,
+        by_channel: [0; 3],
         results: Vec::new(),
         item_best: HashMap::new(),
     };
@@ -1067,6 +1258,7 @@ where
         shard.contaminated,
         shard.results,
         shard.empty_after_filter,
+        shard.by_channel,
     ))
 }
 
@@ -1093,6 +1285,8 @@ fn prepare_scan(
     spaced_ver_identity: f64,
     min_item_coverage: f64,
     out_item_best_path: Option<&str>,
+    exact_channel: &str,
+    exact_min_chars: usize,
 ) -> PyResult<PreparedScan> {
     if min_hits == 0 {
         return Err(PyValueError::new_err("min_hits must be >= 1"));
@@ -1203,6 +1397,46 @@ fn prepare_scan(
         None
     };
 
+    let exact_mode = match exact_channel.to_lowercase().as_str() {
+        "off" => None,
+        "short" => Some(ExactMode::Short),
+        "all" => Some(ExactMode::All),
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "Unknown exact_channel '{}'; expected off, short, or all",
+                other
+            )))
+        }
+    };
+    if exact_min_chars == 0 {
+        return Err(PyValueError::new_err("exact_min_chars must be >= 1"));
+    }
+    let text = if exact_mode.is_some() {
+        if !items_text_exists(index_path) {
+            return Err(PyValueError::new_err(format!(
+                "the exact-match channel (exact_channel) needs the item text sidecar \
+                 '{}', which this index lacks (it predates the sidecar). Rebuild the \
+                 index with build-index; run / run-hf rebuild their cached index.",
+                items_text_path(index_path)
+            )));
+        }
+        let texts = get_item_texts(index_path)?;
+        let matcher = match exact_mode {
+            Some(mode) => Some(get_exact_matcher(
+                index_path,
+                &texts,
+                item_postings.as_deref(),
+                mode,
+                exact_min_chars,
+                min_hits,
+            )?),
+            None => None,
+        };
+        Some(TextChannels { texts, matcher })
+    } else {
+        None
+    };
+
     let spaced = if let Some(path) = spaced_path {
         if spaced_min_loci == 0 {
             return Err(PyValueError::new_err("spaced_min_loci must be >= 1"));
@@ -1250,6 +1484,7 @@ fn prepare_scan(
         },
         item_postings,
         spaced,
+        text,
     })
 }
 
@@ -1279,7 +1514,7 @@ fn pyfile_to_tempfile(obj: &Bound<'_, PyAny>) -> PyResult<File> {
 
 #[allow(clippy::too_many_arguments)]
 #[pyfunction]
-#[pyo3(signature = (input, text_key, id_key, index_path, n, min_hits, min_coverage, index_backend="auto", out_hits_path=None, packed_doc_sep=Some("<|endoftext|>"), packed_doc_sep_typo=Some("<|endoftext}>"), max_return_records=Some(500), stopgrams_path=None, gate_mode="auto", min_longest_run=0, spaced_path=None, spaced_min_loci=3, spaced_ver_min_span=17, spaced_ver_identity=0.85, boilerplate_threshold=50, messages_key=None, min_item_coverage=0.0, out_item_best_path=None))]
+#[pyo3(signature = (input, text_key, id_key, index_path, n, min_hits, min_coverage, index_backend="auto", out_hits_path=None, packed_doc_sep=Some("<|endoftext|>"), packed_doc_sep_typo=Some("<|endoftext}>"), max_return_records=Some(500), stopgrams_path=None, gate_mode="auto", min_longest_run=0, spaced_path=None, spaced_min_loci=3, spaced_ver_min_span=17, spaced_ver_identity=0.85, boilerplate_threshold=50, messages_key=None, min_item_coverage=0.0, out_item_best_path=None, exact_channel="off", exact_min_chars=12, channel_counts=None))]
 pub fn scan_stream_rust(
     py: Python<'_>,
     input: Bound<'_, PyAny>,
@@ -1305,6 +1540,9 @@ pub fn scan_stream_rust(
     messages_key: Option<&str>,
     min_item_coverage: f64,
     out_item_best_path: Option<&str>,
+    exact_channel: &str,
+    exact_min_chars: usize,
+    channel_counts: Option<Bound<'_, PyDict>>,
 ) -> PyResult<(usize, usize, Vec<String>, usize)> {
     // `text_key` is one column name or a list of them.
     let text_keys: Vec<String> = if text_key.is_instance_of::<PyString>() {
@@ -1334,7 +1572,14 @@ pub fn scan_stream_rust(
         spaced_ver_identity,
         min_item_coverage,
         out_item_best_path,
+        exact_channel,
+        exact_min_chars,
     )?;
+    let channels_on = [
+        true,
+        cfg.spaced.is_some(),
+        cfg.text.as_ref().is_some_and(|t| t.matcher.is_some()),
+    ];
 
     // `None` and `Some(0)` both mean "no cap": 0 used to return no records at all,
     // contradicting the documented "use 0 to disable".
@@ -1346,7 +1591,17 @@ pub fn scan_stream_rust(
     let file_processing_result = py.detach(move || scan_reader(temp_file, cfg, limits));
 
     match file_processing_result {
-        Ok(tuple) => Ok(tuple),
+        Ok((scanned, contaminated, records, empty, by_channel)) => {
+            if let Some(out) = channel_counts {
+                let names = [CHANNEL_NGRAM, CHANNEL_SPACED, CHANNEL_EXACT];
+                for ((name, count), on) in names.iter().zip(by_channel).zip(channels_on) {
+                    if on {
+                        out.set_item(*name, count)?;
+                    }
+                }
+            }
+            Ok((scanned, contaminated, records, empty))
+        }
         Err(e_str) => Err(PyValueError::new_err(format!(
             "Rust worker failed for input stream: {}",
             e_str

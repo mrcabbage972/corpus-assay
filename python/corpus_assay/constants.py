@@ -4,6 +4,10 @@ from pathlib import Path
 FIELD_SEPARATOR = "<|field_sep|>"
 INDEX_FORMAT_VERSION = 2
 
+# Suffix of the item text sidecar (`<index>.items.text.jsonl`): one JSON line per
+# item with its raw field texts, read by the exact-match channel.
+ITEMS_TEXT_SUFFIX = ".items.text.jsonl"
+
 # Single source of truth for the normalization config path. The Rust extension
 # never hardcodes a config path: this path is resolved here and handed to it via
 # `set_ngram_config_path` (see corpus_assay/__init__.py). A CLI may pass a

@@ -10,6 +10,7 @@ All binary files are little-endian. Every JSON sidecar carries a `schema_version
 | `<index>.native.attr` | Header (type 2) + `<u64 hash, u64 benchmark_mask>` records, sorted by hash |
 | `<index>.native.items` | Item postings, format v2: header (type 5) + per hash, sorted: `<u64 hash, u32 n, n × (u32 item_idx, u32 field_mask)>` |
 | `<index>.native.items.meta.json` | Item table: `(benchmark, item_id, n_protected_hashes)` per item index, plus `fields`: each benchmark's field names, in spec order |
+| `<index>.native.items.text.jsonl` | Item text: one JSON line per item, `{"item_idx", "benchmark", "item_id", "fields"}`, with the raw field texts (see below). Read by `--exact-channel` |
 | `<index>.native.item_stopgrams` | With `stopgrams.items`: the n-grams dropped as item stop-grams, in the stop-grams format (`CASTOP1` header, sorted `u64` hashes) |
 | `<index>.native.sources.json` | Benchmark legend: `id_to_name`, `name_to_id`, per-benchmark hash totals |
 | `<index>.native.meta.json` | Provenance: tool versions, `ngram`, normalization config hash/SHA, hash function, benchmark specs, HF dataset fingerprints and resolved revisions, and per-benchmark counts (`benchmark_stats`) |
@@ -40,6 +41,24 @@ The two formats are told apart by the header's file type, not its format version
 scanned against it carry no `field_hits`, and `report` skips the field-match table;
 rebuild the index to get them. `run` / `run-hf` rebuild a cached index whose `.items`
 is v1.
+
+### Item text (`.items.text.jsonl`)
+
+One line per indexed item, in item order (`item_idx` is the item's index in
+`.items.meta.json`, the `item_id` of the records):
+
+```json
+{"item_idx": 0, "benchmark": "mmlu", "item_id": "mmlu#0",
+ "fields": ["What is the capital of France?", ["Paris", "Lyon", "Nice", "Lille"]]}
+```
+
+`fields` holds one entry per spec field, in spec order, before any normalization: the
+field's text (`""` when empty), or a list of strings when the field holds several
+texts (a list of multiple-choice options, or a `{"text": [...], "label": [...]}`
+mapping), so each option can be checked on its own. The exact channel matches the
+first field. Indexes built before this sidecar existed lack it: they still scan, but
+`--exact-channel` stops with an error asking for a rebuild, and `run` /
+`run-hf` rebuild a cached index without it. `inspect-index` says whether it is present.
 
 ### Common binary header (36 bytes)
 
@@ -94,20 +113,27 @@ normalization hashes.
 ```
 
 - **`_FINAL_SUMMARY.json`** holds the run totals: `total_files`, `failed_files`,
-  `total_docs_scanned`, `total_contaminated`, `contamination_rate` and
-  `total_empty_after_filter`. Documents are counted per packed sub-document (of each
-  scanned field or chat turn).
+  `total_docs_scanned`, `total_contaminated`, `contamination_rate`,
+  `total_empty_after_filter` and `total_contaminated_by_channel`, the flagged
+  sub-documents per enabled channel (`{"ngram": 120, "exact": 14}`; `spaced` with
+  `--spaced-seeds`). A sub-document flagged by several channels counts in each, so
+  the channel counts can add up to more than `total_contaminated`. Documents are
+  counted per packed sub-document (of each scanned field or chat turn).
 - **`_RUN_MANIFEST.json`** holds the full scan config (including `text_keys`,
-  `messages_key`, and `packed_doc_sep`, which is `null` under `--no-split`), the index
+  `messages_key`, `packed_doc_sep`, which is `null` under `--no-split`,
+  `exact_channel` and `exact_min_chars`), the index
   paths and SHA-256s, the input file list, tool versions, and stop-gram provenance. `reproduce` reads it,
   re-checks the recorded hashes, and re-runs the scan.
-- **`summaries/<shard>.summary.json`** holds per-shard counts, an `error` field when the
+- **`summaries/<shard>.summary.json`** holds per-shard counts (including
+  `contaminated_by_channel`, as in the final summary), an `error` field when the
   shard failed, and a run fingerprint. A re-run with the same fingerprint skips the
-  shard. The fingerprint covers the index (including `.items`, `.items.meta.json`
-  and `.item_stopgrams`), config, and normalization config.
+  shard. The fingerprint covers the index (including `.items`, `.items.meta.json`,
+  `.items.text.jsonl` and `.item_stopgrams`), config, and normalization config.
+  Summaries written before `contaminated_by_channel` existed still load.
 - **`per_source_hits/<shard>.hits.bin`** has a header of type 3, then
   `<u64 hash, u64 mask>` for **every** distinct matched hash in the shard. `report`
-  aggregates these files.
+  aggregates these files. They hold n-gram matches only: exact-channel matches
+  appear in the records and the per-channel counts, not here.
 - **`per_item_best/<shard>.json`** (indexes with `.items`) lists, for every item with
   at least one hit in the shard, the sub-document holding the largest share of its
   n-grams, over every scanned sub-document (flagged or not):
@@ -130,7 +156,15 @@ normalization hashes.
                   "item_ngrams": 90, "item_coverage": 0.944,
                   "field_hits": [[0, 60], [1, 25]],
                   "fields_matched": ["question", "choices"]}],
-   "field": "text"}
+   "field": "text", "channels": ["ngram"]}
+  ```
+
+  A short item flagged by the exact channel:
+
+  ```json
+  {"schema_version": 3, "doc_id": "doc9-part-0", "match_count": 0, "src_hits": [],
+   "exact_hits": [{"item_id": 3, "field": 0, "choices_found": 4, "choices_total": 4}],
+   "channels": ["exact"], "field": "text"}
   ```
 
   A flagged turn of a chat column (`--messages-key messages`):
@@ -164,12 +198,24 @@ normalization hashes.
     `.items` sidecar.
   - `spaced_item` appears when the experimental spaced-seed channel flagged the
     document.
+  - `channels` lists the channels that flagged the sub-document: `ngram` (the
+    n-gram gate), `spaced`, `exact`.
+  - `exact_hits` (with `--exact-channel`) lists the items whose question (`field`
+    0) occurs verbatim in the sub-document, after light normalization and on word
+    boundaries. `match_count` and `src_hits` stay n-gram counts, so a record flagged
+    by the exact channel alone can have `match_count` 0.
+  - Text evidence, on `item_hits` and `exact_hits` entries, needs the item text
+    sidecar and is computed for the written records only. With `--exact-channel`:
+    `choices_found` / `choices_total`, the item's other fields (each option of a
+    list field on its own) found within 1,000 characters of the matched question
+    (anywhere in the sub-document when the question does not occur verbatim).
   - `field` is the column the sub-document came from (a text key, or the messages
     key). For a chat turn, `role` is the turn's role (omitted when it has none) and
     `turn` its index in the messages list, counted from 0.
   - Schema history: v3 added `field`, `role` and `turn`, and later the optional
     `item_hits` fields `item_ngrams`, `item_coverage`, `field_hits` and
-    `fields_matched`; v2 added `item_hits` and
+    `fields_matched`, then `channels`, `exact_hits` and the text evidence fields;
+    v2 added `item_hits` and
     `spaced_item`. Readers (`inspect-run`, `report`) still accept v2 records.
 
 ## Reports (`report`)
@@ -181,7 +227,11 @@ normalization hashes.
   records (`contaminated_docs/`) by which fields matched: `full` (every field of the
   item that has n-grams, e.g. question and choices), `question_only` (only the first
   spec field), `partial` (another subset) and `single_field` (the item has n-grams in
-  one field only).
+  one field only). The scan summary includes the flagged documents per channel.
+  `exact_matches` (when a sampled record has an exact hit) counts the exact
+  matches, the matched items, the records flagged by the exact channel alone, and,
+  for items with choices, the matches with all, some or none of the choices near the
+  question.
 - **`leak_by_benchmark.csv` / `.json`:** `benchmark`, `total_hashes_in_index`,
   `leaked_hashes`, `leak_fraction`.
 - **`leak_by_shard.csv` / `.json`:** unique leaked hashes per shard, per 1k documents.

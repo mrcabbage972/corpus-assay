@@ -74,6 +74,7 @@ class FinalSummary(BaseModel):
     total_contaminated: int = 0
     contamination_rate: float = 0.0
     total_empty_after_filter: int = 0
+    total_contaminated_by_channel: dict[str, int] = Field(default_factory=dict)
     failed_files: int = 0
     total_files: int = 0
 
@@ -86,6 +87,28 @@ class ReportScanSummary(BaseModel):
     total_contaminated: int
     contamination_rate: float
     total_empty_after_filter: int
+    # Flagged sub-documents per channel (ngram, spaced, exact); empty for scans
+    # written before channels were counted.
+    total_contaminated_by_channel: dict[str, int] = Field(default_factory=dict)
+
+
+class ExactMatchSummary(BaseModel):
+    """Exact-channel matches in the sampled records (``contaminated_docs/``).
+
+    ``all_choices`` / ``some_choices`` / ``no_choices``: matches of items with
+    choices, by how many of them were found within 1,000 characters of the
+    matched question. ``exact_only_records``: records the exact channel alone
+    flagged.
+    """
+
+    records: int = 0
+    exact_only_records: int = 0
+    exact_hits: int = 0
+    items_matched: int = 0
+    with_choices: int = 0
+    all_choices: int = 0
+    some_choices: int = 0
+    no_choices: int = 0
 
 
 class LeakByBenchmarkRow(BaseModel):
@@ -196,6 +219,9 @@ class ReportPayload(BaseModel):
     # Full-item vs question-only matches among the sampled records; None when
     # the index's `.items` sidecar has no field masks (format v1) or is missing.
     field_matches: FieldMatchSummary | None = None
+    # Exact-channel matches among the sampled records; None when no record
+    # carries one.
+    exact_matches: ExactMatchSummary | None = None
     bad_shards: BadShards
     examples: ExamplesSection
     warnings: list[str]
@@ -271,6 +297,7 @@ def _load_scan_summary(
             total_contaminated=final_summary.total_contaminated,
             contamination_rate=final_summary.contamination_rate,
             total_empty_after_filter=final_summary.total_empty_after_filter,
+            total_contaminated_by_channel=final_summary.total_contaminated_by_channel,
         )
 
     total_files = len(summary_paths)
@@ -279,6 +306,7 @@ def _load_scan_summary(
     total_docs_scanned = 0
     total_contaminated = 0
     total_empty_after_filter = 0
+    by_channel: dict[str, int] = defaultdict(int)
 
     for path in summary_paths:
         summary = ScanSummary.model_validate_json(path.read_text(encoding="utf-8"))
@@ -289,6 +317,8 @@ def _load_scan_summary(
         total_docs_scanned += int(summary.scanned)
         total_contaminated += int(summary.contaminated)
         total_empty_after_filter += int(summary.empty_after_filter)
+        for channel, count in summary.contaminated_by_channel.items():
+            by_channel[channel] += int(count)
 
     contamination_rate = (
         (total_contaminated / total_docs_scanned) if total_docs_scanned else 0.0
@@ -301,6 +331,7 @@ def _load_scan_summary(
         total_contaminated=total_contaminated,
         contamination_rate=contamination_rate,
         total_empty_after_filter=total_empty_after_filter,
+        total_contaminated_by_channel=dict(sorted(by_channel.items())),
     )
 
 
@@ -598,6 +629,38 @@ def _build_field_matches(
     return summary
 
 
+def _build_exact_matches(layout: OutputLayout) -> ExactMatchSummary | None:
+    """Exact matches in the sampled records; None when there are none."""
+    exact = ExactMatchSummary()
+    exact_items: set[int] = set()
+    for path in sorted(layout.contaminated_dir.glob("*.ndjson")):
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    record = parse_contamination_record(line)
+                except ValueError:
+                    continue  # not a scanner record; `inspect-run` validates them
+                exact.records += 1
+                if record.channels == ["exact"]:
+                    exact.exact_only_records += 1
+                for ehit in record.exact_hits:
+                    exact.exact_hits += 1
+                    exact_items.add(ehit.item_id)
+                    found, total = ehit.choices_found, ehit.choices_total
+                    if found is not None and total:
+                        exact.with_choices += 1
+                        if found == total:
+                            exact.all_choices += 1
+                        elif found:
+                            exact.some_choices += 1
+                        else:
+                            exact.no_choices += 1
+    exact.items_matched = len(exact_items)
+    return exact if exact.exact_hits else None
+
+
 def _build_bad_shards(
     *,
     shard_rows: list[ShardLeakRow],
@@ -697,6 +760,12 @@ def _render_markdown_report(
         f"- Gate mode: `{run_cfg.gate_mode}`",
         f"- Min item coverage: `{run_cfg.min_item_coverage}`"
         + (" (off)" if not run_cfg.min_item_coverage else ""),
+        f"- Exact channel: `{run_cfg.exact_channel}`"
+        + (
+            f" (min chars `{run_cfg.exact_min_chars}`)"
+            if run_cfg.exact_channel != "off"
+            else ""
+        ),
         f"- {stopgrams_line}",
         "",
         "## Scan summary",
@@ -707,6 +776,18 @@ def _render_markdown_report(
         f"- Docs contaminated: `{scan_summary.total_contaminated}`",
         f"- Contamination rate: `{scan_summary.contamination_rate:.4%}`",
         f"- Docs empty after stop-grams: `{scan_summary.total_empty_after_filter}`",
+        *(
+            [
+                "- Docs flagged by channel: "
+                + ", ".join(
+                    f"{channel} `{count}`"
+                    for channel, count in scan_summary.total_contaminated_by_channel.items()
+                )
+                + " (a doc flagged by several channels counts in each)"
+            ]
+            if scan_summary.total_contaminated_by_channel
+            else []
+        ),
         "",
         "## Leak by benchmark (top 10)",
         "",
@@ -789,6 +870,26 @@ def _render_markdown_report(
                 "| --- | --- | --- | --- |",
                 f"| {fm.full} | {fm.question_only} | {fm.partial} | "
                 f"{fm.single_field} |",
+                "",
+            ]
+        )
+
+    if report.exact_matches is not None:
+        em = report.exact_matches
+        lines.extend(
+            [
+                "## Exact matches (sampled records)",
+                "",
+                f"{em.exact_hits} exact question matches of {em.items_matched} items "
+                f"in {em.records} sampled records; {em.exact_only_records} records "
+                "were flagged by the exact channel alone. Of the matches of items "
+                "with choices, how many of the choices occur within 1,000 "
+                "characters of the question:",
+                "",
+                "| Items with choices | All choices | Some | None |",
+                "| --- | --- | --- | --- |",
+                f"| {em.with_choices} | {em.all_choices} | {em.some_choices} | "
+                f"{em.no_choices} |",
                 "",
             ]
         )
@@ -1050,6 +1151,10 @@ def generate_report_from_scan_dir(
 
     examples = _build_examples(layout, scan_dir=scan_dir_path)
     field_matches = _build_field_matches(layout, index_path=index_path)
+    # Only scans with the exact channel carry exact hits.
+    exact_matches: ExactMatchSummary | None = None
+    if manifest.config.exact_channel != "off":
+        exact_matches = _build_exact_matches(layout)
 
     warnings: list[str] = []
 
@@ -1078,6 +1183,7 @@ def generate_report_from_scan_dir(
         leak_by_benchmark=leak_by_benchmark,
         leak_by_item=leak_by_item,
         field_matches=field_matches,
+        exact_matches=exact_matches,
         bad_shards=bad_shards,
         examples=examples,
         warnings=warnings,

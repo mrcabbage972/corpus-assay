@@ -1,3 +1,4 @@
+mod exact;
 mod formats;
 mod index;
 mod items_index;
@@ -21,6 +22,7 @@ fn corpus_assay(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Export text normalization utilities
     m.add_function(wrap_pyfunction!(text::set_ngram_config_path, m)?)?;
     m.add_function(wrap_pyfunction!(text::normalize_text, m)?)?;
+    m.add_function(wrap_pyfunction!(text::light_normalize, m)?)?;
     m.add_function(wrap_pyfunction!(text::ngram_allowed, m)?)?;
     m.add_function(wrap_pyfunction!(text::hash_ngram, m)?)?;
     m.add_function(wrap_pyfunction!(text::ngram_filter, m)?)?;

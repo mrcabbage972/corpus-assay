@@ -12,6 +12,7 @@ from multiprocessing import get_context
 from pathlib import Path
 
 from corpus_assay.config import ScanConfig
+from corpus_assay.constants import ITEMS_TEXT_SUFFIX
 from corpus_assay.normalization import (
     active_ngram_config_path,
     set_ngram_config_path,
@@ -135,6 +136,26 @@ def _is_supported_scan_file(path: Path) -> bool:
     return path.name.endswith(SUPPORTED_SCAN_EXTENSIONS)
 
 
+def check_item_text_sidecar(cfg: ScanConfig) -> None:
+    """Raise ``ValueError`` when the scan needs the item text sidecar but the
+    index has none (it was built before the sidecar existed)."""
+    features = []
+    if cfg.exact_channel != "off":
+        features.append(f"--exact-channel {cfg.exact_channel}")
+    if not features:
+        return
+    index_path = Path(cfg.index_path)
+    sidecar = index_path.with_name(f"{index_path.name}{ITEMS_TEXT_SUFFIX}")
+    if not sidecar.exists():
+        raise ValueError(
+            f"{' and '.join(features)} {'need' if len(features) > 1 else 'needs'} "
+            f"the item text sidecar {sidecar}, "
+            "which this index lacks (it was built before the sidecar existed). "
+            "Rebuild the index with build-index; run and run-hf rebuild their "
+            "cached index."
+        )
+
+
 def do_scan(cfg: ScanConfig, *, print_progress: bool = True) -> RunSummary:
     """Scan every shard in ``cfg.inputs`` with a pool of ``cfg.workers`` processes.
 
@@ -142,6 +163,7 @@ def do_scan(cfg: ScanConfig, *, print_progress: bool = True) -> RunSummary:
     under ``if __name__ == "__main__":``; otherwise a ``RuntimeError`` says so.
     """
     _refuse_scan_during_worker_bootstrap()
+    check_item_text_sidecar(cfg)
     files = collect_files(cfg.inputs)
 
     run_fingerprint = build_run_fingerprint(cfg)
@@ -150,6 +172,7 @@ def do_scan(cfg: ScanConfig, *, print_progress: bool = True) -> RunSummary:
     total_scanned = 0
     total_contaminated = 0
     total_empty_after_filter = 0
+    total_by_channel: dict[str, int] = {}
     per_file: list[ScanSummary] = []
 
     ok = 0
@@ -175,6 +198,8 @@ def do_scan(cfg: ScanConfig, *, print_progress: bool = True) -> RunSummary:
                 total_scanned += summary.scanned
                 total_contaminated += summary.contaminated
                 total_empty_after_filter += summary.empty_after_filter
+                for channel, count in summary.contaminated_by_channel.items():
+                    total_by_channel[channel] = total_by_channel.get(channel, 0) + count
             else:
                 failed += 1
 
@@ -197,5 +222,6 @@ def do_scan(cfg: ScanConfig, *, print_progress: bool = True) -> RunSummary:
         total_contaminated=total_contaminated,
         contamination_rate=rate,
         total_empty_after_filter=total_empty_after_filter,
+        total_contaminated_by_channel=dict(sorted(total_by_channel.items())),
         per_file=per_file,
     )

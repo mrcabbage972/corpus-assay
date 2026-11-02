@@ -41,6 +41,14 @@ distinct 13-grams. With `--min-item-coverage C`, a document holding at least a s
 of one item's 13-grams is flagged too, however long it is. Matching runs on normalized text (Unicode NFKC, lowercased, stop
 words removed), so it survives casing, punctuation, and whitespace changes.
 
+**Short items.** Items too short to have `min_hits` 13-grams once stop words are
+removed (many short math problems and commonsense multiple-choice questions) can never
+be flagged by the n-gram rule; `build-index`, `inspect-index` and `describe-benchmark`
+say how many there are. `--exact-channel short` matches their questions verbatim, after
+a light normalization that keeps numbers, operators and stop words (so `2+3` and `2-3`
+stay different), and reports whether the item's choices appear near the question. It
+is off by default and needs an index built by this version.
+
 This is a *verbatim-overlap* detector. Paraphrases, translations, and heavily edited
 copies will not be flagged. An experimental spaced-seed channel
 ([docs](https://github.com/mrcabbage972/corpus-assay/blob/main/docs/experimental-spaced-seeds.md))
@@ -216,7 +224,7 @@ benchmarks:
 
 ```
 scan_out/
-├── _FINAL_SUMMARY.json / .csv      # totals: docs scanned, contaminated, failed files
+├── _FINAL_SUMMARY.json / .csv      # totals: docs scanned, contaminated (per channel), failed files
 ├── _RUN_MANIFEST.json              # full scan config, input hashes, tool versions
 ├── summaries/<shard>.summary.json  # per-shard counts (also the resume cache)
 ├── per_source_hits/<shard>.hits.bin

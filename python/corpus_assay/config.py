@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import (
@@ -20,6 +20,11 @@ from corpus_assay.benchmark_spec import BenchmarkSpec
 DEFAULT_PACKED_DOC_SEP = "<|endoftext|>"
 DEFAULT_PACKED_DOC_SEP_TYPO = "<|endoftext}>"
 
+# Which items the exact-match channel matches: none (off), the items with fewer
+# than min_hits n-grams (short), or every item (all).
+ExactChannel = Literal["off", "short", "all"]
+DEFAULT_EXACT_MIN_CHARS = 12
+
 
 class DecontaminationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -31,6 +36,9 @@ class DecontaminationConfig(BaseModel):
     # Share of one item's n-grams a document must hold (with >= min_hits hits) to
     # be flagged whatever its document coverage; 0 turns it off. See ScanConfig.
     min_item_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
+    # Exact-match channel; see ScanConfig.
+    exact_channel: ExactChannel = "off"
+    exact_min_chars: int = Field(default=DEFAULT_EXACT_MIN_CHARS, ge=1)
     background: "BackgroundConfig | None" = None
     stopgrams: "StopGramsConfig | None" = None
     spaced: "SpacedSeedsConfig | None" = None
@@ -128,6 +136,16 @@ class ScanConfig(BaseModel):
     # document whatever its document coverage (an OR path to the union rule); in
     # item mode it is an extra requirement on the flagging item. Needs `.items`.
     min_item_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
+    # Exact-match channel: match each eligible item's question (its first field)
+    # verbatim, after light normalization (NFKC, lowercase, whitespace runs
+    # collapsed; numbers, operators, punctuation and stop words kept), on word
+    # boundaries. A match flags the sub-document whatever the n-gram gate says.
+    # "short": items with fewer than min_hits n-grams (the n-gram rule cannot
+    # flag them); "all": every item; "off" (default). Questions shorter than
+    # exact_min_chars characters (after light normalization) are not matched.
+    # Needs the `.items.text.jsonl` sidecar.
+    exact_channel: ExactChannel = "off"
+    exact_min_chars: int = Field(default=DEFAULT_EXACT_MIN_CHARS, ge=1)
 
     @field_validator("index_backend")
     @classmethod

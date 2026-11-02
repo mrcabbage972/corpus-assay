@@ -8,7 +8,7 @@ from typing import Any
 from corpus_assay import _native
 from corpus_assay._version import dist_version
 from corpus_assay.config import ScanConfig
-from corpus_assay.constants import INDEX_FORMAT_VERSION
+from corpus_assay.constants import INDEX_FORMAT_VERSION, ITEMS_TEXT_SUFFIX
 from corpus_assay.normalization import active_ngram_config_path
 
 
@@ -60,6 +60,11 @@ def build_run_fingerprint(cfg: ScanConfig) -> dict[str, Any]:
         # fingerprint names every index artifact. None when not built.
         "index_item_stopgrams_sha256": _file_sha256(
             index_path.with_name(f"{index_path.name}.item_stopgrams")
+        ),
+        # Raw item text: decides exact-channel flags and the text evidence in
+        # the records. None when the index has none.
+        "index_items_text_sha256": _file_sha256(
+            index_path.with_name(f"{index_path.name}{ITEMS_TEXT_SUFFIX}")
         ),
         "config_sha256": hashlib.sha256(
             json.dumps(cfg.model_dump(), sort_keys=True).encode("utf-8")

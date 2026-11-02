@@ -77,6 +77,43 @@ All notable changes to this project are documented here. The format follows
   told apart from one of the question alone. `report` counts the item matches of the
   sampled records as full-item, question-only, partial and single-field
   (`field_matches` in `report.json`, a table in `report.md`).
+- **Item text sidecar** `<index>.native.items.text.jsonl`, written by `build-index`:
+  one JSON line per item, `{item_idx, benchmark, item_id, fields}`, with each spec
+  field's raw text (a list of strings for a list-valued field, such as
+  multiple-choice options). The exact channel reads it. The index
+  meta lists it under `files.items_text`, the run fingerprint hashes it, and
+  `inspect-index` says whether it is present. **Existing indexes lack it and must be
+  rebuilt to use `--exact-channel`** (they still scan without it, and the flag
+  stops with an error that says so); `run` / `run-hf` rebuild a cached index
+  without it.
+- Exact-match channel (#1). `--exact-channel short|all` (on `scan`, `run`, `run-hf`;
+  config key `exact_channel`; default `off`, so existing results do not change)
+  matches each eligible item's question (its first field) verbatim, after a light
+  normalization (NFKC, lowercase, whitespace runs collapsed; numbers, operators,
+  punctuation, LaTeX and stop words kept, so `2+3` and `2-3` stay different), on word
+  boundaries, with one Aho-Corasick automaton per worker. `short` covers the items
+  with fewer than `min_hits` n-grams, which the n-gram rule can never flag; `all`
+  covers every item. `--exact-min-chars` (default 12; config `exact_min_chars`) leaves
+  out shorter questions. A match flags the sub-document whatever the n-gram gate
+  decided. `describe-benchmark`, `build-index` and `inspect-index` point to it when a
+  benchmark has short items. `aho-corasick` becomes a direct Rust dependency (it was
+  already in the lockfile).
+- Records (schema v3, optional fields) gain `channels` (`ngram`, `spaced`, `exact`:
+  what flagged the sub-document) and, with the exact channel, `exact_hits`
+  (`[{item_id, field: 0, choices_found, choices_total}]`). Shard summaries gain
+  `contaminated_by_channel` and `_FINAL_SUMMARY.json` gains
+  `total_contaminated_by_channel`: flagged sub-documents per enabled channel; older
+  summaries still load. `report` shows them, and counts the exact matches of the
+  sampled records (`exact_matches`). `hits.bin` stays n-gram only. `scan_stream_rust`
+  takes `exact_channel`, `exact_min_chars` and a `channel_counts` dict it fills.
+- Choices near the question (rest of #3). With the exact channel,
+  every `exact_hits` and `item_hits` entry of a written record carries
+  `choices_found` / `choices_total`: how many of the item's other fields (each option
+  of a list field on its own) occur within 1,000 characters of the matched question
+  (for an n-gram hit, of the question's first verbatim occurrence, or anywhere in the
+  sub-document when it has none).
+- The run manifest's `scan_config` records `exact_channel` and `exact_min_chars`
+  (absent in older manifests: off).
 
 ### Changed
 
@@ -127,6 +164,11 @@ All notable changes to this project are documented here. The format follows
   earlier version are re-scanned.
 - The order of the options in `scan`/`run`/`run-hf --help` changed slightly: the
   shared scan options are defined once and listed together.
+- `ScanConfig` gains `exact_channel` and `exact_min_chars`, so the resume
+  fingerprint of every run changes and shards scanned by an earlier version are
+  re-scanned once.
+- Benchmark loaders' `load_positive_fields` yields a list of strings for a
+  list-valued field (`benchmarks._field_values`); the hashed text is unchanged.
 
 ### Fixed
 

@@ -184,6 +184,27 @@ pub fn normalize_text_rust(s: &str, re: &'static Regex) -> Vec<String> {
     tokens
 }
 
+/// Light normalization for the exact-match channel: NFKC,
+/// lowercase, every whitespace run collapsed to one space, trimmed. Unlike
+/// [`normalize_text_rust`] it keeps every character (numbers, operators,
+/// punctuation, LaTeX, stop words), so `2+3` and `2-3` stay different.
+pub fn light_normalize_rust(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut pending_space = false;
+    for c in s.nfkc().flat_map(char::to_lowercase) {
+        if c.is_whitespace() {
+            pending_space = !out.is_empty();
+            continue;
+        }
+        if pending_space {
+            out.push(' ');
+            pending_space = false;
+        }
+        out.push(c);
+    }
+    out
+}
+
 pub fn hash_ngram_text(ngram: &str) -> u64 {
     let mut hasher = Blake2b::<U8>::new();
     hasher.update(ngram.as_bytes());
@@ -264,6 +285,13 @@ pub fn set_ngram_config_path(path: &str) -> PyResult<()> {
 #[pyfunction]
 pub fn normalize_text(s: &str) -> PyResult<Vec<String>> {
     Ok(normalize_text_rust(s, get_word_re()))
+}
+
+/// The light normalization of the exact-match channel (see
+/// [`light_normalize_rust`]).
+#[pyfunction]
+pub fn light_normalize(s: &str) -> String {
+    light_normalize_rust(s)
 }
 
 #[pyfunction]

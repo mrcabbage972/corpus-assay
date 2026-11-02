@@ -606,3 +606,110 @@ def test_item_stopgrams_drop_a_repeated_instruction(
         env=env,
     )  # fmt: skip
     assert _summary(scan_out)["total_contaminated"] == 0
+
+
+# A multiple-choice benchmark with a question too short for any 13-gram, and a
+# templated problem long enough for the n-gram rule.
+MC_SHORT = {"question": "What is 2+3 apples in total?", "choices": ["5", "6", "x9"]}
+MC_TEMPLATE = (
+    "In the figure a circle is inscribed in a square whose corners touch a larger "
+    "circle drawn around it, and the shaded region lies between the two circles "
+    "outside the square. If the radius of the small circle is {a} centimetres and "
+    "the square has side {b} centimetres, what is the area of the shaded region?"
+)
+MC_LONG = {"question": MC_TEMPLATE.format(a=7, b=14), "choices": ["49 pi", "98"]}
+
+
+def test_exact_channel(tmp_path: Path, env: dict[str, str]) -> None:
+    items = tmp_path / "mc.jsonl"
+    items.write_text(
+        "".join(json.dumps(i) + "\n" for i in (MC_SHORT, MC_LONG)), encoding="utf-8"
+    )
+    spec = {
+        "name": "MC",
+        "dataset": "json",
+        "data_files": {"test": items.as_posix()},
+        "splits": ["test"],
+        "fields": ["question", "choices"],
+    }
+    cfg = _benchmark_config(tmp_path, "mc", [spec])
+    index = tmp_path / "mc_idx" / "mc.native"
+    index.parent.mkdir()
+    _cli(
+        "build-index", "--config", str(cfg), "--out-index", str(index),
+        "--allow-unpinned",
+        env=env,
+    )  # fmt: skip
+    text_sidecar = index.with_name(index.name + ".items.text.jsonl")
+    lines = text_sidecar.read_text("utf-8").splitlines()
+    assert json.loads(lines[0])["fields"] == [MC_SHORT["question"], ["5", "6", "x9"]]
+    proc = _cli("inspect-index", "--index", str(index), env=env)
+    assert "item text (.items.text.jsonl): present" in proc.stdout
+
+    shards = tmp_path / "mc_shards"
+    shards.mkdir()
+    docs = [
+        f"{FILLER} quiz: {MC_SHORT['question']} (a) 5 (b) 6 (c) x9",
+        f"{FILLER} {MC_LONG['question']}",
+        f"{FILLER} {MC_TEMPLATE.format(a=5, b=10)}",
+        FILLER,
+    ]
+    pq.write_table(
+        pa.table({"text": docs, "id": [f"m{i}" for i in range(len(docs))]}),
+        shards / "m.parquet",
+    )
+    base = [
+        "scan", "--input", str(shards), "--index", str(index), "--config", str(cfg),
+        "--id-key", "id", "--workers", "1", "--all-records",
+    ]  # fmt: skip
+
+    # Default: the short item is out of reach, and records carry no text evidence.
+    plain = tmp_path / "mc_plain"
+    _cli(*base, "--out-dir", str(plain), env=env)
+    summary = _summary(plain)
+    assert summary["total_contaminated"] == 2
+    assert summary["total_contaminated_by_channel"] == {"ngram": 2}
+    assert [r["doc_id"] for r in _records(plain)] == ["m1-part-0", "m2-part-0"]
+    assert all(r["channels"] == ["ngram"] for r in _records(plain))
+
+    out = tmp_path / "mc_exact"
+    _cli(*base, "--out-dir", str(out), "--exact-channel", "short", env=env)
+    summary = _summary(out)
+    assert summary["total_contaminated"] == 3
+    assert summary["total_contaminated_by_channel"] == {"exact": 1, "ngram": 2}
+    records = {r["doc_id"]: r for r in _records(out)}
+    exact = records["m0-part-0"]
+    assert exact["channels"] == ["exact"]
+    (ehit,) = exact["exact_hits"]
+    assert (ehit["item_id"], ehit["choices_found"], ehit["choices_total"]) == (0, 3, 3)
+    copy_hit = records["m1-part-0"]["item_hits"][0]
+    assert (copy_hit["choices_found"], copy_hit["choices_total"]) == (0, 2)
+    manifest = json.loads((out / "_RUN_MANIFEST.json").read_text("utf-8"))
+    assert manifest["scan_config"]["exact_channel"] == "short"
+    assert manifest["scan_config"]["exact_min_chars"] == 12
+
+    _cli("inspect-run", "--scan-dir", str(out), env=env)
+    _cli("report", "--scan-dir", str(out), env=env)
+    report = json.loads((out / "report" / "report.json").read_text("utf-8"))
+    assert report["scan_summary"]["total_contaminated_by_channel"] == {
+        "exact": 1,
+        "ngram": 2,
+    }
+    assert report["exact_matches"]["exact_hits"] == 1
+    assert report["exact_matches"]["all_choices"] == 1
+    md = (out / "report" / "report.md").read_text("utf-8")
+    assert "## Exact matches (sampled records)" in md
+    assert "- Exact channel: `short` (min chars `12`)" in md
+
+    # An index built before the item text sidecar: a clear error, only when the
+    # feature is asked for.
+    text_sidecar.unlink()
+    old = tmp_path / "mc_old"
+    _cli(*base, "--out-dir", str(old), env=env)
+    proc = _cli(
+        *base, "--out-dir", str(old), "--exact-channel", "short", env=env, ok=False
+    )
+    assert proc.returncode != 0
+    assert "items.text.jsonl" in proc.stderr and "Rebuild" in proc.stderr
+    proc = _cli("inspect-index", "--index", str(index), env=env)
+    assert "item text (.items.text.jsonl): missing" in proc.stdout

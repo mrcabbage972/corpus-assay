@@ -11,6 +11,8 @@ ngram: 13              # n-gram length (tokens)
 min_hits: 3            # distinct matching n-grams needed to flag a document
 min_coverage: 0.001    # matching / distinct n-grams in the document, in [0, 1]
 min_item_coverage: 0   # share of one item's n-grams a document holds; 0 = off
+exact_channel: off     # exact-match channel: off, short or all
+exact_min_chars: 12    # shortest question the exact channel matches (characters)
 background: ...        # optional: corpus for build-stopgrams-direct
 stopgrams: ...         # optional: stop-grams to apply during scans, and stop-grams
                        # learned from the items at index time (stopgrams.items)
@@ -225,6 +227,23 @@ An index records the hash of the config it was built with. `scan`, `run` and `ru
 refuse to scan with a different active config unless `--allow-config-mismatch` is
 passed. `run`/`run-hf` also key their index cache on that hash.
 
+## Exact matching (`exact_channel`, `exact_min_chars`)
+
+```yaml
+exact_channel: short   # off (default), short or all
+exact_min_chars: 12
+```
+
+`exact_channel: short` matches, verbatim, the question of each item the n-gram rule
+cannot flag (fewer than `min_hits` n-grams; `inspect-index` and `describe-benchmark`
+show how many there are). `all` matches every item. `exact_min_chars` leaves out
+questions too short to be specific. The channel is off by default so existing results
+stay reproducible, and the `--exact-channel` and `--exact-min-chars` flags override
+these keys. It needs the item text sidecar
+(`<index>.items.text.jsonl`), which indexes built before it existed lack: rebuild them
+(`run` and `run-hf` rebuild their cached index). See
+[how-it-works.md](how-it-works.md#the-exact-match-channel).
+
 ## Scan options worth knowing
 
 | Option | Default | Meaning |
@@ -237,6 +256,8 @@ passed. `run`/`run-hf` also key their index cache on that hash.
 | `--gate-mode` | `union` | `union` or `item` (see [how-it-works.md](how-it-works.md)). |
 | `--min-longest-run` | `0` | Item gate only: also require a contiguous shared run of N tokens. |
 | `--min-item-coverage` | config `min_item_coverage` (`0`, off) | Share of one item's n-grams a document must hold (`hits / item n-grams`, with at least `min_hits` hits). In `union` mode such a document is flagged whatever its document coverage; in `item` mode it is an extra requirement on the flagging item. Needs `.items`. |
+| `--exact-channel` | config `exact_channel` (`off`) | Exact-match channel: `short` matches the question (first field) of every item with fewer than `min_hits` n-grams, which the n-gram rule cannot flag; `all` matches every item. Verbatim after light normalization (NFKC, lowercase, whitespace), on word boundaries; a match flags the document. Needs `.items.text.jsonl`. |
+| `--exact-min-chars` | config `exact_min_chars` (`12`) | Questions shorter than this many characters (after light normalization) are not matched by the exact channel. |
 | `--boilerplate-threshold` | `50` | Item fan-out at which a matched n-gram counts as boilerplate in attribution. |
 | `--max-return-records` | `500` | Flagged records written per shard: a sample of the first N flagged. `0` removes the cap. |
 | `--all-records` | off | Write every flagged record (same as `--max-return-records 0`). |

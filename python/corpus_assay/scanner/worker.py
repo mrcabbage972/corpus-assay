@@ -50,13 +50,20 @@ def scan_file(
     file_path: Path,
     cfg: ScanConfig,
     layout: OutputLayout,
+    channel_counts: dict[str, int] | None = None,
 ) -> tuple[int, int, int, list[str]]:
+    """Scan one shard: ``(scanned, contaminated, empty_after_filter, records)``.
+
+    ``channel_counts``, when given, receives the flagged sub-documents per
+    enabled channel (``ngram``, ``spaced``, ``exact``).
+    """
     stem = layout.stem_from_path(file_path)
     hits_path = layout.per_hits_path(stem)
     item_best_path = layout.per_item_best_path(stem)
     # Written only when the index has item postings; drop one from an earlier run.
     item_best_path.unlink(missing_ok=True)
     index_backend = _resolve_index_backend(cfg)
+    counts: dict[str, int] = {}
 
     with _open_scan_input(file_path, cfg) as f:
         scanned, contaminated, json_results, empty_after_filter = scan_stream_rust(
@@ -83,8 +90,13 @@ def scan_file(
             spaced_min_loci=cfg.spaced_min_loci,
             spaced_ver_min_span=cfg.spaced_ver_min_span,
             spaced_ver_identity=cfg.spaced_ver_identity,
+            exact_channel=cfg.exact_channel,
+            exact_min_chars=cfg.exact_min_chars,
+            channel_counts=counts,
         )
 
+    if channel_counts is not None:
+        channel_counts.update({str(k): int(v) for k, v in counts.items()})
     return int(scanned), int(contaminated), int(empty_after_filter), list(json_results)
 
 
@@ -208,6 +220,7 @@ def build_scan_summary(
     empty_after_filter: int,
     hits_path: Path,
     run_fingerprint: dict[str, Any],
+    channel_counts: dict[str, int] | None = None,
 ) -> ScanSummary:
     per_source = aggregate_per_source_hits(hits_path)
     return ScanSummary(
@@ -217,6 +230,7 @@ def build_scan_summary(
         contam_rate=(contaminated / scanned) if scanned else 0.0,
         empty_after_filter=empty_after_filter,
         per_source=per_source.to_legacy_dict(),
+        contaminated_by_channel=dict(channel_counts or {}),
         run_fingerprint=run_fingerprint,
     )
 
@@ -236,8 +250,9 @@ def scan_one_file_worker(
     layout.ensure_dirs()
 
     try:
+        channels: dict[str, int] = {}
         scanned, contaminated, empty_after_filter, json_results = scan_file(
-            file_path, cfg, layout
+            file_path, cfg, layout, channel_counts=channels
         )
     except Exception as e:
         return ScanSummary(file=file_path.name, error=str(e))
@@ -253,6 +268,7 @@ def scan_one_file_worker(
         empty_after_filter,
         hits_path,
         run_fingerprint,
+        channel_counts=channels,
     )
     write_summary(summary_path, summary)
     return summary
