@@ -213,6 +213,7 @@ benchmarks:
 | `inspect-index` | Validate an index and list per-benchmark item and n-gram counts |
 | `scan` | Scan Parquet/JSONL shards against an index |
 | `run`, `run-hf` | Build or reuse a cached index, then scan local shards or an HF split |
+| `filter` | Scan, then write decontaminated copies of the shards with a manifest of the index used |
 | `report` | Leak reports (JSON, CSV, Markdown) from a scan directory |
 | `inspect-run` | Validate a scan output directory |
 | `reproduce` | Re-run a scan from its `_RUN_MANIFEST.json` after checking input hashes |
@@ -243,6 +244,28 @@ scan_out/
 Re-running `scan` with the same inputs and config skips shards that are already done.
 File formats are documented in
 [docs/outputs.md](https://github.com/mrcabbage972/corpus-assay/blob/main/docs/outputs.md).
+
+## Filtering
+
+`filter` takes the same options as `scan`, scans every shard (keeping every flagged
+record), and writes cleaned copies in the input format, at the inputs' relative
+paths, without touching the inputs:
+
+```bash
+corpus-assay filter --input data/ --index index.native --config config.yaml \
+  --id-key id --out-dir data_clean/                  # drop rows with a flagged part
+corpus-assay filter ... --granularity subdoc         # drop only the flagged parts
+```
+
+`record` granularity (the default) drops every row with a flagged sub-document;
+`subdoc` drops the flagged packed parts, empties flagged text fields and removes
+flagged chat turns, and drops a row only when nothing is left. Next to the data it
+writes `_FILTER_MANIFEST.json` (the index files' SHA-256, the benchmarks with their
+revisions and splits, the per-benchmark counts, gate and thresholds, tool versions,
+input and output shard hashes and row counts, and removals per benchmark),
+`removed_ids.ndjson`, a `DATASET_CARD_SNIPPET.md` to paste into the dataset card,
+and the scan itself under `_scan/`. It refuses a non-empty `--out-dir` unless
+`--overwrite`.
 
 ## Reducing false positives
 

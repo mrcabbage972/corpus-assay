@@ -8,6 +8,7 @@ a local JSONL file loaded through ``dataset: json`` + ``data_files``.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import subprocess
@@ -730,3 +731,57 @@ def test_exact_channel_and_confirm(tmp_path: Path, env: dict[str, str]) -> None:
     assert "items.text.jsonl" in proc.stderr and "Rebuild" in proc.stderr
     proc = _cli("inspect-index", "--index", str(index), env=env)
     assert "item text (.items.text.jsonl): missing" in proc.stdout
+
+
+def test_filter_removes_the_planted_rows(
+    tmp_path: Path, config: Path, index: Path, env: dict[str, str]
+) -> None:
+    shards = _shards(tmp_path)
+    jsonl_before = (shards / "b.jsonl").read_bytes()
+    out = tmp_path / "clean"
+    proc = _cli(
+        "filter", "--input", str(shards), "--index", str(index), "--out-dir", str(out),
+        "--config", str(config), "--id-key", "id", "--workers", "2",
+        env=env,
+    )  # fmt: skip
+    assert "12 rows in, 10 out (2 removed)" in proc.stdout
+
+    original = pq.read_table(shards / "a.parquet")
+    cleaned = pq.read_table(out / "a.parquet")
+    assert cleaned.schema.equals(original.schema)
+    assert cleaned.to_pylist() == original.slice(0, 9).to_pylist()
+    first_line = jsonl_before.splitlines(keepends=True)[0]
+    assert (out / "b.jsonl").read_bytes() == first_line
+    assert (shards / "b.jsonl").read_bytes() == jsonl_before
+
+    manifest = json.loads((out / "_FILTER_MANIFEST.json").read_text("utf-8"))
+    assert (
+        manifest["index"]["native_sha256"]
+        == hashlib.sha256(index.read_bytes()).hexdigest()
+    )
+    (bench,) = manifest["index"]["benchmarks"]
+    assert (bench["name"], bench["split"]) == ("TinyQA", "test")
+    (stats,) = manifest["index"]["benchmark_stats"]
+    assert stats["items"] == 3 and stats["ngrams"] > 0
+    assert manifest["removals"]["by_benchmark"] == {
+        "TinyQA": {"rows_removed": 2, "rows_modified": 0, "flagged_subdocs": 2}
+    }
+    assert manifest["scan_config"]["min_hits"] == 3
+    rows = {
+        s["output_path"]: (s["rows_before"], s["rows_after"])
+        for s in manifest["shards"]
+    }
+    assert rows == {"a.parquet": (10, 9), "b.jsonl": (2, 1)}
+
+    removed = [
+        json.loads(line)
+        for line in (out / "removed_ids.ndjson").read_text("utf-8").splitlines()
+    ]
+    assert sorted((r["shard"], r["row_index"], r["doc_id"]) for r in removed) == [
+        ("a.parquet", 9, "p9-part-0"),
+        ("b.jsonl", 1, "j1-part-0"),
+    ]
+    assert all(r["benchmarks"] == ["TinyQA"] for r in removed)
+    snippet = (out / "DATASET_CARD_SNIPPET.md").read_text("utf-8")
+    assert "| TinyQA | json | - | test |" in snippet
+    _cli("report", "--scan-dir", str(out / "_scan"), env=env)

@@ -138,6 +138,22 @@ All notable changes to this project are documented here. The format follows
   `min_longest_run` and `boilerplate_threshold`. All optional: older manifests
   still load in `reproduce`, `inspect-run` and `report`. `reproduce` also checks
   the `.native` SHA-256 when the manifest has it.
+- `filter` (#8): scans like `scan` (same options, every flagged record kept) into
+  `<out-dir>/_scan/`, then writes each input shard, cleaned, in its own format at
+  its path relative to the inputs' common directory: Parquet with its schema,
+  metadata, columns and codec; JSONL (`.gz`, `.zst`) keeping every other line byte
+  for byte. `--granularity record` (default) drops every row with a flagged
+  sub-document; `subdoc` drops the flagged packed parts and rejoins the rest,
+  empties a flagged text field (`""`), removes a flagged chat turn, and drops a row
+  left with no text. It writes `_FILTER_MANIFEST.json` (index file hashes,
+  benchmarks with revisions and splits, per-benchmark item and n-gram counts, gate,
+  thresholds and channels, config hashes, tool versions, input and output shard
+  hashes and row counts, removals in total, per benchmark and per channel),
+  `removed_ids.ndjson` (one line per flagged sub-document: shard, row, doc id,
+  field / role / turn / part, benchmarks, channels) and `DATASET_CARD_SNIPPET.md`.
+  It refuses a non-empty `--out-dir` (unless `--overwrite`), an `--out-dir` inside an
+  input directory, shards whose scan outputs would collide (same file stem), and
+  writes nothing when a shard fails to scan.
 
 ### Changed
 

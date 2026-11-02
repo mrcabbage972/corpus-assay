@@ -1,4 +1,11 @@
 from corpus_assay.schemas.doc_result import DOC_RESULT_SCHEMA_VERSION, DocResult
+from corpus_assay.schemas.filter_manifest import (
+    FILTER_MANIFEST_SCHEMA_VERSION,
+    FilterCounts,
+    FilterManifest,
+    FilterRemovals,
+    FilterShard,
+)
 from corpus_assay.schemas.index_meta import (
     INDEX_META_SCHEMA_VERSION,
     BenchmarkStats,
@@ -28,6 +35,11 @@ from corpus_assay.schemas.stopgrams_meta import (
 )
 
 __all__ = [
+    "FILTER_MANIFEST_SCHEMA_VERSION",
+    "FilterCounts",
+    "FilterManifest",
+    "FilterRemovals",
+    "FilterShard",
     "BenchmarkStats",
     "DOC_RESULT_SCHEMA_VERSION",
     "DocResult",

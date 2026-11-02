@@ -1279,6 +1279,105 @@ def scan(
     _run_scan(scan_cfg, out_dir_p)
 
 
+@app.command("filter")
+@_with_scan_options
+def filter_cmd(
+    *,
+    inputs: list[str] = typer.Option(
+        ...,
+        "--input",
+        "--input-glob",
+        help=(
+            "Input path(s): directory, glob (recursive), or file list. Repeat --input for multiple."
+        ),
+    ),
+    index: str = typer.Option(..., help="Path to the .native index."),
+    out_dir: str = typer.Option(
+        ...,
+        help=(
+            "Directory for the cleaned shards (at the inputs' paths relative to "
+            "their common directory), _FILTER_MANIFEST.json, removed_ids.ndjson, "
+            "DATASET_CARD_SNIPPET.md and the scan outputs (_scan/)."
+        ),
+    ),
+    opts: ScanOptions,
+    config: str = typer.Option(
+        ..., help="YAML config with decontamination hyperparameters."
+    ),
+    granularity: str = typer.Option(
+        "record",
+        help=(
+            "record: drop every row with a flagged sub-document. subdoc: remove "
+            "only the flagged sub-documents (packed parts are dropped and the rest "
+            "rejoined, an emptied text field is set to '', an emptied chat turn is "
+            "removed); a row left with no text is dropped."
+        ),
+    ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="Replace the outputs of a previous filter run in a non-empty --out-dir.",
+    ),
+) -> None:
+    """Write decontaminated copies of the shards, with a manifest of the index used.
+
+    Scans like `scan` (every flagged record is kept, whatever
+    --max-return-records says), then writes each shard in its own format with
+    the flagged rows (or sub-documents) removed. Input files are not modified.
+    """
+    from corpus_assay import filtering
+
+    if granularity not in ("record", "subdoc"):
+        raise typer.BadParameter(
+            f"--granularity must be record or subdoc (got {granularity!r})."
+        )
+    cfg = load_decontamination_config(Path(config))
+    # Every flagged sub-document must come back to be removed. Built (and its
+    # sidecars checked) before plan_filter clears a previous run's outputs.
+    scan_cfg = _scan_config_from_options(
+        opts._replace(all_records=True),
+        cfg,
+        out_dir=Path(out_dir).resolve() / filtering.SCAN_DIR_NAME,
+        inputs=inputs,
+        index_path=index,
+    )
+    try:
+        plan = filtering.plan_filter(inputs, Path(out_dir), overwrite=overwrite)
+    except (filtering.FilterError, FileNotFoundError) as e:
+        raise typer.BadParameter(str(e)) from e
+    run = do_scan(scan_cfg)
+    write_run_outputs(layout=OutputLayout(plan.scan_dir), run=run, cfg=scan_cfg)
+    try:
+        manifest = filtering.write_filtered(
+            plan,
+            scan_cfg,
+            run,
+            granularity=granularity,  # type: ignore[arg-type]
+            config_path=config,
+        )
+    except filtering.FilterError as e:
+        typer.echo(f"[filter] ERROR: {e}", err=True)
+        raise typer.Exit(code=1) from None
+
+    rem = manifest.removals
+    typer.echo(
+        f"[filter] {len(manifest.shards)} shard(s): {rem.rows_before:,} rows in, "
+        f"{rem.rows_after:,} out ({rem.rows_removed:,} removed"
+        + (f", {rem.rows_modified:,} modified" if granularity == "subdoc" else "")
+        + f"); {rem.flagged_subdocs:,} flagged sub-documents."
+    )
+    for name, counts in rem.by_benchmark.items():
+        typer.echo(
+            f"  {name}: {counts.rows_removed:,} rows removed"
+            + (
+                f", {counts.rows_modified:,} modified"
+                if granularity == "subdoc"
+                else ""
+            )
+        )
+    typer.echo(f"[filter] Wrote {plan.out_dir / filtering.FILTER_MANIFEST_NAME}")
+
+
 @app.command("run-hf")
 @_with_scan_options
 def run_hf(
