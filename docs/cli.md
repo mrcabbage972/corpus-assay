@@ -184,6 +184,9 @@ $ corpus-assay reproduce [OPTIONS]
 
 Describe a benchmark registry entry.
 
+Prints the spec, then the registry metadata (scored split, gating, short-item
+share, notes) as YAML comments.
+
 **Usage**:
 
 ```console

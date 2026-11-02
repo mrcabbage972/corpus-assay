@@ -96,15 +96,20 @@ This produces a config you can edit:
 benchmarks:
   - name: GSM8K
     dataset: openai/gsm8k
-    configs: [main]
     splits: [test]
-    fields: [question, answer]
-    revision: null        # pin a Hub commit for reproducible indexes
+    revision: 740312add88f781978c0658806c59bc2815b9866   # registry entries are pinned
+    config_name: main
+    fields: [question]
+    label_field: answer   # only checked for hidden labels, never indexed
   # ...
 ngram: 13
 min_hits: 3
 min_coverage: 0.001
 ```
+
+Registry entries index the split and the text an evaluation harness shows the model
+(validation, where the test labels are hidden). `corpus-assay describe-benchmark <key>`
+shows an entry's spec and notes.
 
 **2. Build the index.** This downloads the benchmark splits from the Hugging Face Hub:
 

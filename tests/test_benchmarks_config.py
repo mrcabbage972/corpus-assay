@@ -77,9 +77,11 @@ def test_config_registry_string_entry(tmp_path) -> None:
     spec = cfg.benchmarks[0]
     assert spec.name == "GSM8K"
     assert spec.dataset == "openai/gsm8k"
-    assert spec.configs == ["main"]
+    assert spec.config_name == "main"
+    assert spec.revision
     assert spec.splits == ["test"]
-    assert spec.fields == ["question", "answer"]
+    # The question only: the worked solution lives in gsm8k_solutions.
+    assert spec.fields == ["question"]
 
 
 def test_config_registry_ref_merge_overrides(tmp_path) -> None:

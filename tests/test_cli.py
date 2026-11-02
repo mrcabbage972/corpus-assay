@@ -532,3 +532,43 @@ def test_scan_dry_run_fails_when_index_missing_sidecars(
     # Ensure dry-run failure doesn't accidentally run the scan pipeline.
     assert len(patch_scan_pipeline["do_scan"]) == 0
     assert len(patch_scan_pipeline["write_run_outputs"]) == 0
+
+
+# ----------------------------
+# Tests: registry commands
+# ----------------------------
+
+
+def test_describe_benchmark_prints_spec_and_metadata() -> None:
+    import yaml
+
+    result = runner.invoke(cli.app, ["describe-benchmark", "commonsenseqa"])
+    assert result.exit_code == 0, result.output
+    # Still a valid spec when pasted into a config: the metadata is comments.
+    spec = yaml.safe_load(result.output)
+    assert spec["splits"] == ["validation"]
+    assert spec["revision"]
+    assert "# Registry metadata" in result.output
+    assert "scored split: validation" in result.output
+    assert "1,161 of 1,221 (95%) have fewer than 3 13-grams" in result.output
+    assert "the n-gram rule cannot flag them" in result.output
+    assert "lower bound" in result.output
+
+    gated = runner.invoke(cli.app, ["describe-benchmark", "gpqa_diamond"]).output
+    assert "gated: yes" in gated
+    assert "short items: not measured" in gated
+    lambada = runner.invoke(cli.app, ["describe-benchmark", "lambada"]).output
+    assert "lower bound" not in lambada
+
+
+def test_init_config_output_passes_revision_pin_check(tmp_path: Path) -> None:
+    out = tmp_path / "config.yaml"
+    result = runner.invoke(
+        cli.app,
+        ["init-config", "--out", str(out), "--benchmarks", "mmlu"]
+        + ["--benchmarks", "hellaswag", "--benchmarks", "aime25"],
+    )
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(cli.app, ["validate-config", "--config", str(out)])
+    assert result.exit_code == 0, result.output
+    assert "Config OK." in result.output

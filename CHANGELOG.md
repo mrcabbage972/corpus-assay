@@ -6,6 +6,31 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Registry entries (#14): `aime24`, `aime25`, `amc23`, `math500`, `gsm8k_solutions`,
+  `jeebench`, `gpqa_diamond`, `humaneval`, `mbpp`, `livecodebench`, `ifeval`,
+  `commonsenseqa`, `arc_challenge`, `arc_easy`, `piqa`. Each entry carries metadata: the
+  split harnesses score, whether the dataset is gated, the share of items with fewer than
+  3 13-grams, and notes. `describe-benchmark` prints it after the spec, as YAML comments.
+
+### Changed
+
+- **Registry entries changed in place.** A config that names these keys now indexes
+  different text, so rebuild indexes built from them:
+  - `mmlu`: the `all` config instead of every subject config, fields `question, choices`
+    (`answer` dropped).
+  - `hellaswag`: the `validation` split (test labels are hidden) instead of `test`,
+    fields `ctx, endings` (`label` dropped).
+  - `arc`: still both ARC configs, fields `question, choices` (`answerKey` dropped).
+    The new `arc_challenge` and `arc_easy` index them separately.
+  - `gsm8k`: the `question` only. The worked solutions moved to `gsm8k_solutions`.
+  - `boolq`: `aps/super_glue` (config `boolq`) instead of `google/boolq`.
+  - `copa`: fields `premise, choice1, choice2` (`question` dropped).
+  - `lambada`: the `default` config, named explicitly.
+- Every registry entry is pinned to a Hub commit, so configs written by `init-config`
+  pass the revision-pin check without `--allow-unpinned`.
+
 ## [0.1.0] - 2026-10-03
 
 Initial public release.

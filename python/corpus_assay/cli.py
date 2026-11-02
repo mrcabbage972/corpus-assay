@@ -11,7 +11,11 @@ import typer
 import yaml
 
 from corpus_assay._native import ngram_config_hash
-from corpus_assay.benchmark_registry import REGISTRY
+from corpus_assay.benchmark_registry import (
+    REGISTRY,
+    SHORT_ITEM_MIN_HITS,
+    SHORT_ITEM_NGRAM,
+)
 from corpus_assay.config import (
     BuildIndexConfig,
     DecontaminationConfig,
@@ -684,9 +688,38 @@ def reproduce(
 def describe_benchmark(
     name: str = typer.Argument(..., help="Registry benchmark key."),
 ) -> None:
-    """Describe a benchmark registry entry."""
-    spec = REGISTRY.resolve_ref(name)
-    typer.echo(yaml.safe_dump(spec.model_dump(), sort_keys=False))
+    """Describe a benchmark registry entry.
+
+    Prints the spec, then the registry metadata (scored split, gating, short-item
+    share, notes) as YAML comments.
+    """
+    entry = REGISTRY.entry(name)
+    typer.echo(yaml.safe_dump(entry.spec.model_dump(), sort_keys=False).rstrip())
+    # Metadata as YAML comments, so the output still pastes into a config.
+    lines = ["Registry metadata (not part of the spec):"]
+    if entry.scored_split:
+        lines.append(
+            f"  scored split: {entry.scored_split} (the split lm-eval-style "
+            "harnesses score)"
+        )
+    lines.append(f"  gated: {'yes' if entry.gated else 'no'}")
+    share = entry.short_item_share
+    if share is not None and entry.item_count is not None:
+        lines.append(
+            f"  short items: {entry.short_items:,} of {entry.item_count:,} "
+            f"({share:.0%}) have fewer than {SHORT_ITEM_MIN_HITS} "
+            f"{SHORT_ITEM_NGRAM}-grams; the n-gram rule cannot flag them."
+        )
+        if share >= 0.25:
+            lines.append(
+                "  Treat this benchmark's n-gram contamination rate as a lower bound."
+            )
+    else:
+        lines.append("  short items: not measured")
+    lines.extend(f"  note: {note}" for note in entry.notes)
+    typer.echo("")
+    for line in lines:
+        typer.echo(f"# {line}")
 
 
 @app.command("validate-config")

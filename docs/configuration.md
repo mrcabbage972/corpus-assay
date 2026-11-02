@@ -42,13 +42,55 @@ Keys of a full spec:
 | `config_name` | `null` | A single config; alternative to `configs`. |
 | `drop_configs` | `null` | Configs to remove after `*` expansion. |
 | `subtraction_splits` | `null` | Splits whose n-grams are *removed* from the index (e.g. `[train]`), so only n-grams specific to the protected split remain. |
-| `revision` | `null` | Hub commit hash or tag. `build-index` requires it unless `--allow-unpinned` is passed. |
+| `revision` | `null` | Hub commit hash or tag. `build-index` requires it unless `--allow-unpinned` is passed. Registry entries are pinned. |
 | `data_files` | `null` | Passed to `datasets.load_dataset`, e.g. `{test: /path/items.jsonl}`. |
 | `trust_remote_code` | `false` | Passed to `datasets.load_dataset`. Script-based datasets are not supported by `datasets` 4.x. |
 
-Built-in registry: `arc`, `boolq`, `copa`, `gsm8k`, `hellaswag`, `lambada`, `mmlu`,
-`mmlu_pro`, `openbookqa`, `winogrande`. Use `corpus-assay describe-benchmark <key>` to
-see each entry's spec.
+### The built-in registry
+
+Each registry entry indexes the split and the text an evaluation harness shows the
+model (not the label), pinned to a Hub commit, so `init-config` writes configs that pass
+the revision-pin check. `corpus-assay describe-benchmark <key>` prints an entry's spec,
+followed by its registry metadata as YAML comments: the split harnesses score, whether
+the dataset is gated, the share of short items, and notes.
+
+| Key | Dataset | Config | Split | Fields | Short items |
+| --- | --- | --- | --- | --- | ---: |
+| `aime24` | `HuggingFaceH4/aime_2024` | | train | problem | 0% |
+| `aime25` | `opencompass/AIME2025` | `data_files` I + II | test | question | 3% |
+| `amc23` | `math-ai/amc23` | | test | question | 12% |
+| `math500` | `HuggingFaceH4/MATH-500` | | test | problem | 32% |
+| `gsm8k` | `openai/gsm8k` | main | test | question | 2% |
+| `gsm8k_solutions` | `openai/gsm8k` | main | test | question, answer | |
+| `jeebench` | `daman1209arora/jeebench` | `data_files` test.json | test | question | 0% |
+| `gpqa_diamond` | `Idavidrein/gpqa` (gated) | gpqa_diamond | train | Question, Correct Answer, Incorrect Answer 1–3 | |
+| `humaneval` | `openai/openai_humaneval` | | test | prompt | 1% |
+| `mbpp` | `google-research-datasets/mbpp` | full | test | text, test_list | 4% |
+| `livecodebench` | `livecodebench/code_generation_lite` | `data_files` test.jsonl … test5.jsonl | test | question_content | |
+| `ifeval` | `google/IFEval` | | train | prompt | 12% |
+| `mmlu` | `cais/mmlu` | all | test | question, choices | 32% |
+| `mmlu_pro` | `TIGER-Lab/MMLU-Pro` | | test | question, options | |
+| `hellaswag` | `Rowan/hellaswag` | | **validation** | ctx, endings | 0% |
+| `commonsenseqa` | `tau/commonsense_qa` | | **validation** | question, choices | 95% |
+| `arc` | `allenai/ai2_arc` | ARC-Challenge + ARC-Easy | test | question, choices | 49% |
+| `arc_challenge` | `allenai/ai2_arc` | ARC-Challenge | test | question, choices | 37% |
+| `arc_easy` | `allenai/ai2_arc` | ARC-Easy | test | question, choices | 55% |
+| `piqa` | `baber/piqa` | | **validation** | goal, sol1, sol2 | 68% |
+| `boolq` | `aps/super_glue` | boolq | **validation** | passage, question | 1% |
+| `winogrande` | `allenai/winogrande` | winogrande_xl | **validation** | sentence, option1, option2 | 85% |
+| `openbookqa` | `allenai/openbookqa` | main | test | question_stem, choices | 77% |
+| `copa` | `aps/super_glue` | copa | **validation** | premise, choice1, choice2 | 100% |
+| `lambada` | `EleutherAI/lambada_openai` | default | test | text | 0% |
+
+Bold splits are the ones lm-eval scores because the test labels are hidden. "Short
+items" is the share of items with fewer than 3 13-grams, measured with the bundled
+normalization config; blank means not measured. `arc` is both ARC configs as one
+benchmark; use `arc_challenge` and `arc_easy` instead to report them apart, not
+together with `arc`. `gsm8k` indexes the question only; add `gsm8k_solutions` to also
+catch copies of the worked solutions.
+
+**Gated datasets.** `gpqa_diamond` needs a Hub login (`hf auth login`) and the dataset's
+terms accepted on its Hub page. Without them it loads nothing.
 
 **Short items.** N-grams never cross fields, so a field shorter than `ngram`
 normalized tokens contributes nothing to the index. COPA's fields are one short
