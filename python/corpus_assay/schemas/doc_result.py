@@ -8,7 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field
 # messages column), and for chat turns `role` and `turn`. Later additions are
 # optional fields under v3 (item_hits' item_ngrams / item_coverage /
 # field_hits / fields_matched; `exact_hits` and `channels`; the text evidence
-# choices_found / choices_total on item_hits and exact_hits). Mirrors
+# choices_found / choices_total / numbers_total / numbers_matched / lcs_chars /
+# lcs_ratio on item_hits and exact_hits). Mirrors
 # DOC_RESULT_SCHEMA_VERSION in src/scan.rs.
 DOC_RESULT_SCHEMA_VERSION = 3
 
@@ -36,9 +37,13 @@ class ItemHitOut(BaseModel):
     # the item, and the matched fields' names. Absent for `.items` v1 sidecars.
     field_hits: list[tuple[int, int]] = Field(default_factory=list)
     fields_matched: list[str] = Field(default_factory=list)
-    # v3, with the exact channel (the item text sidecar).
+    # v3, with the exact channel or --confirm (the item text sidecar).
     choices_found: int | None = Field(default=None, ge=0)
     choices_total: int | None = Field(default=None, ge=0)
+    numbers_total: int | None = Field(default=None, ge=0)
+    numbers_matched: int | None = Field(default=None, ge=0)
+    lcs_chars: int | None = Field(default=None, ge=0)
+    lcs_ratio: float | None = Field(default=None, ge=0.0)
 
 
 class ExactHitOut(BaseModel):
@@ -49,6 +54,10 @@ class ExactHitOut(BaseModel):
     field: int = Field(default=0, ge=0)
     choices_found: int | None = Field(default=None, ge=0)
     choices_total: int | None = Field(default=None, ge=0)
+    numbers_total: int | None = Field(default=None, ge=0)
+    numbers_matched: int | None = Field(default=None, ge=0)
+    lcs_chars: int | None = Field(default=None, ge=0)
+    lcs_ratio: float | None = Field(default=None, ge=0.0)
 
 
 class DocResult(BaseModel):

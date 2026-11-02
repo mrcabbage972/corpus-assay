@@ -184,7 +184,7 @@ pub fn normalize_text_rust(s: &str, re: &'static Regex) -> Vec<String> {
     tokens
 }
 
-/// Light normalization for the exact-match channel: NFKC,
+/// Light normalization for the exact-match and confirmation channels: NFKC,
 /// lowercase, every whitespace run collapsed to one space, trimmed. Unlike
 /// [`normalize_text_rust`] it keeps every character (numbers, operators,
 /// punctuation, LaTeX, stop words), so `2+3` and `2-3` stay different.

@@ -19,7 +19,7 @@ All three settings come from the normalization config, a JSON file bundled as
 `corpus-assay --ngram-config path.json <command>`. The config is frozen on first use
 within a process, and its SHA-256 is recorded in every index and scan manifest.
 
-**Light normalization.** The exact-match channel (section 4) uses a
+**Light normalization.** The exact-match channel and `--confirm` (section 4) use a
 second, lighter normalization instead: Unicode NFKC, lowercasing, every whitespace run
 collapsed to one space, and trimming. Nothing else changes: numbers, operators,
 punctuation, LaTeX and stop words are kept, so `What is 2+3?` and `What is 2-3?` stay
@@ -55,7 +55,7 @@ from the Hugging Face Hub or from local `data_files`. It writes:
   which fields of an item a document matched.
 - `index.native.items.text.jsonl`: the raw text of every item, field by field (a
   list-valued field such as multiple-choice options keeps each option apart). Read by
-  the exact-match channel; nothing else needs it.
+  the exact-match channel and `--confirm`; nothing else needs it.
 - `index.native.sources.json` and `index.native.meta.json`: the benchmark legend and
   provenance (configs, dataset fingerprints, revisions, normalization hashes), plus
   per-benchmark item and n-gram counts.
@@ -168,7 +168,7 @@ What it can and cannot catch:
 
 ### Choices near the question
 
-When the exact channel is on, every written record gets, for each item
+When the exact channel or `--confirm` is on, every written record gets, for each item
 it matched (exact or n-gram), `choices_found` / `choices_total`: how many of the item's
 other fields occur, on word boundaries, within 1,000 characters of the matched question
 in the lightly normalized sub-document. Each option of a list-valued field (MMLU's
@@ -176,6 +176,28 @@ in the lightly normalized sub-document. Each option of a list-valued field (MMLU
 n-gram match it is the first verbatim occurrence of the question, if any; otherwise
 the choices are looked for in the whole sub-document. Short choices (a single number
 or letter) are easy to find by chance; read the counts as supporting evidence.
+
+### Copy or template variant (`--confirm`)
+
+N-grams treat numbers like any other word, and stop words are removed, so two
+problems from one template (same wording, other numbers, or another question about
+the same figure) share many n-grams. `--confirm` adds, for each flagged (document,
+item) pair, on lightly normalized text:
+
+- `numbers_total` / `numbers_matched`: the distinct numbers (`[0-9]+(\.[0-9]+)?`) in
+  the item's question, and how many of them occur in the sub-document as whole number
+  tokens;
+- `lcs_chars` / `lcs_ratio`: the longest common substring of the question and the
+  sub-document, in characters and as a share of the question (computed with a suffix
+  automaton of the question, in time linear in the sub-document's length).
+
+A copy has every number and an `lcs_ratio` near 1; a template variant misses numbers.
+`report` lists the likely variants. `--confirm` is report only: it never changes which
+documents are flagged.
+
+Workers are started with the `spawn` method. With more than one worker the index is
+memory-mapped (`--index-backend auto`), so the hash set is shared through the page cache
+rather than copied into every process.
 
 ## 5. Reports
 
@@ -189,8 +211,9 @@ or letter) are easy to find by chance; read the counts as supporting evidence.
   document holds the item.
 
 These counts cover every matched hash, not just the sampled records. From the sampled
-records, `report` also counts which fields of the matched items matched, and the exact
-matches and how many of their choices were found.
+records, `report` also counts which fields of the matched items matched, the exact
+matches and how many of their choices were found, and lists the likely template
+variants found by `--confirm`.
 
 ## Choosing thresholds
 

@@ -1,9 +1,9 @@
-"""The exact-match channel and choices near the question.
+"""The exact-match channel, choices near the question, and ``confirm``.
 
 The exact channel matches each eligible item's question verbatim after light
 normalization (NFKC, lowercase, whitespace collapsed; numbers, operators and stop
 words kept) on word boundaries, so it can flag items too short for the n-gram
-rule.
+rule. ``confirm`` adds report-only copy-vs-variant evidence.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import pytest
 
 from corpus_assay._native import (
     light_normalize,
+    longest_common_substring,
     scan_stream_rust,
 )
 from corpus_assay.benchmark_spec import BenchmarkSpec
@@ -105,6 +106,13 @@ def test_light_normalize_keeps_numbers_operators_and_stop_words() -> None:
     assert light_normalize("ＡＢＣ　ｘ²") == "abc x2"  # NFKC
     assert light_normalize("2+3") != light_normalize("2-3")
     assert light_normalize("$\\frac{1}{2}$ of the") == "$\\frac{1}{2}$ of the"
+
+
+def test_longest_common_substring() -> None:
+    assert longest_common_substring("abcdef", "zzcdezz") == 3
+    assert longest_common_substring("abc", "xyz") == 0
+    assert longest_common_substring("Same Text", "same   text") == 9
+    assert longest_common_substring("", "abc") == 0
 
 
 def test_field_values_keep_list_fields_as_lists() -> None:
@@ -198,6 +206,38 @@ def test_long_items_are_matched_with_all_and_carry_both_channels(index: str) -> 
     assert counts == {"ngram": 1, "exact": 1}
 
 
+def test_confirm_tells_a_copy_from_a_template_variant(index: str) -> None:
+    copy = f"{FILLER} {LONG['question']}"
+    variant = f"{FILLER} {TEMPLATE.format(a=5, b=10)}"
+    contaminated, records, _ = _scan(index, [copy, variant], confirm=True)
+    assert contaminated == 2  # the n-gram rule flags both
+    by_doc = {r["doc_id"]: r["item_hits"][0] for r in records}
+    copy_hit, variant_hit = by_doc["d0-part-0"], by_doc["d1-part-0"]
+    assert copy_hit["numbers_total"] == copy_hit["numbers_matched"] == 2
+    assert copy_hit["lcs_ratio"] == 1.0
+    assert copy_hit["lcs_chars"] == len(light_normalize(LONG["question"]))
+    assert variant_hit["numbers_total"] == 2
+    assert variant_hit["numbers_matched"] == 0
+    assert variant_hit["lcs_ratio"] < copy_hit["lcs_ratio"]
+    assert "exact_hits" not in records[0]  # confirm alone adds no exact channel
+
+
+def test_confirm_never_changes_the_flags(index: str) -> None:
+    docs = [
+        f"{FILLER} {LONG['question']}",
+        f"{FILLER} {TEMPLATE.format(a=5, b=10)}",
+        FILLER,
+        f"quiz. {SHORT['question']}",
+        "short",
+    ]
+    for kwargs in ({}, {"exact_channel": "short"}, {"gate_mode": "item"}):
+        plain = _scan(index, docs, **kwargs)
+        confirmed = _scan(index, docs, confirm=True, **kwargs)
+        assert plain[0] == confirmed[0]
+        assert [r["doc_id"] for r in plain[1]] == [r["doc_id"] for r in confirmed[1]]
+        assert plain[2] == confirmed[2]
+
+
 def test_index_without_the_text_sidecar(index: str, tmp_path: Path) -> None:
     Path(index + ".items.text.jsonl").unlink()
     doc = f"{FILLER} {LONG['question']}"
@@ -205,7 +245,7 @@ def test_index_without_the_text_sidecar(index: str, tmp_path: Path) -> None:
     contaminated, records, _ = _scan(index, [doc])
     assert contaminated == 1
     assert "choices_found" not in records[0]["item_hits"][0]
-    for kwargs in ({"exact_channel": "short"},):
+    for kwargs in ({"exact_channel": "short"}, {"confirm": True}):
         with pytest.raises(ValueError, match="items.text.jsonl.*Rebuild"):
             _scan(index, [doc], **kwargs)
 
@@ -215,6 +255,8 @@ def test_index_without_the_text_sidecar(index: str, tmp_path: Path) -> None:
     check_item_text_sidecar(cfg)
     with pytest.raises(ValueError, match="--exact-channel short needs"):
         check_item_text_sidecar(cfg.model_copy(update={"exact_channel": "short"}))
+    with pytest.raises(ValueError, match="--confirm needs"):
+        check_item_text_sidecar(cfg.model_copy(update={"confirm": True}))
 
 
 def test_records_without_the_new_fields_still_parse() -> None:
@@ -242,7 +284,7 @@ def test_fingerprint_and_config_record_the_text_channels(index: str) -> None:
         != (before["index_items_text_sha256"])
     )
     # The settings are part of the config, hence of the fingerprint.
-    exact = cfg.model_copy(update={"exact_channel": "short"})
+    exact = cfg.model_copy(update={"exact_channel": "short", "confirm": True})
     assert build_run_fingerprint(exact)["config_sha256"] != before["config_sha256"]
     assert cfg.model_dump()["exact_channel"] == "off"
     assert cfg.model_dump()["exact_min_chars"] == 12

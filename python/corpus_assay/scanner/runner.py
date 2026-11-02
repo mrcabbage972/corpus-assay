@@ -142,6 +142,8 @@ def check_item_text_sidecar(cfg: ScanConfig) -> None:
     features = []
     if cfg.exact_channel != "off":
         features.append(f"--exact-channel {cfg.exact_channel}")
+    if cfg.confirm:
+        features.append("--confirm")
     if not features:
         return
     index_path = Path(cfg.index_path)

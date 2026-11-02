@@ -13,6 +13,7 @@ min_coverage: 0.001    # matching / distinct n-grams in the document, in [0, 1]
 min_item_coverage: 0   # share of one item's n-grams a document holds; 0 = off
 exact_channel: off     # exact-match channel: off, short or all
 exact_min_chars: 12    # shortest question the exact channel matches (characters)
+confirm: false         # report copy-vs-variant evidence for flagged pairs
 background: ...        # optional: corpus for build-stopgrams-direct
 stopgrams: ...         # optional: stop-grams to apply during scans, and stop-grams
                        # learned from the items at index time (stopgrams.items)
@@ -227,19 +228,21 @@ An index records the hash of the config it was built with. `scan`, `run` and `ru
 refuse to scan with a different active config unless `--allow-config-mismatch` is
 passed. `run`/`run-hf` also key their index cache on that hash.
 
-## Exact matching (`exact_channel`, `exact_min_chars`)
+## Exact matching and confirmation (`exact_channel`, `exact_min_chars`, `confirm`)
 
 ```yaml
 exact_channel: short   # off (default), short or all
 exact_min_chars: 12
+confirm: true
 ```
 
 `exact_channel: short` matches, verbatim, the question of each item the n-gram rule
 cannot flag (fewer than `min_hits` n-grams; `inspect-index` and `describe-benchmark`
 show how many there are). `all` matches every item. `exact_min_chars` leaves out
-questions too short to be specific. The channel is off by default so existing results
-stay reproducible, and the `--exact-channel` and `--exact-min-chars` flags override
-these keys. It needs the item text sidecar
+questions too short to be specific. `confirm` adds report-only copy-vs-variant
+evidence to the records. All three are off by default so existing results stay
+reproducible, and the `--exact-channel`, `--exact-min-chars` and `--confirm` /
+`--no-confirm` flags override them. They need the item text sidecar
 (`<index>.items.text.jsonl`), which indexes built before it existed lack: rebuild them
 (`run` and `run-hf` rebuild their cached index). See
 [how-it-works.md](how-it-works.md#the-exact-match-channel).
@@ -258,6 +261,7 @@ these keys. It needs the item text sidecar
 | `--min-item-coverage` | config `min_item_coverage` (`0`, off) | Share of one item's n-grams a document must hold (`hits / item n-grams`, with at least `min_hits` hits). In `union` mode such a document is flagged whatever its document coverage; in `item` mode it is an extra requirement on the flagging item. Needs `.items`. |
 | `--exact-channel` | config `exact_channel` (`off`) | Exact-match channel: `short` matches the question (first field) of every item with fewer than `min_hits` n-grams, which the n-gram rule cannot flag; `all` matches every item. Verbatim after light normalization (NFKC, lowercase, whitespace), on word boundaries; a match flags the document. Needs `.items.text.jsonl`. |
 | `--exact-min-chars` | config `exact_min_chars` (`12`) | Questions shorter than this many characters (after light normalization) are not matched by the exact channel. |
+| `--confirm` / `--no-confirm` | config `confirm` (off) | For each flagged (document, item) pair, report the item's numbers found in the document and the longest common substring with its question, to tell copies from template variants. Report only: the flags do not change. Needs `.items.text.jsonl`. |
 | `--boilerplate-threshold` | `50` | Item fan-out at which a matched n-gram counts as boilerplate in attribution. |
 | `--max-return-records` | `500` | Flagged records written per shard: a sample of the first N flagged. `0` removes the cap. |
 | `--all-records` | off | Write every flagged record (same as `--max-return-records 0`). |

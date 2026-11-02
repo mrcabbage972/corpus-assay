@@ -92,6 +92,7 @@ def scan_file(
             spaced_ver_identity=cfg.spaced_ver_identity,
             exact_channel=cfg.exact_channel,
             exact_min_chars=cfg.exact_min_chars,
+            confirm=cfg.confirm,
             channel_counts=counts,
         )
 

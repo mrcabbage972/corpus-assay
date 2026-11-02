@@ -53,6 +53,14 @@ class ReportOutputLayout:
         return self.out_dir / "leak_by_item.json"
 
     @property
+    def template_variants_json(self) -> Path:
+        return self.out_dir / "template_variants.json"
+
+    @property
+    def template_variants_csv(self) -> Path:
+        return self.out_dir / "template_variants.csv"
+
+    @property
     def leak_by_item_csv(self) -> Path:
         return self.out_dir / "leak_by_item.csv"
 
@@ -92,6 +100,15 @@ class ReportScanSummary(BaseModel):
     total_contaminated_by_channel: dict[str, int] = Field(default_factory=dict)
 
 
+# A flagged (document, item) pair is listed as a likely template variant when
+# ``--confirm`` found some of the item's numbers missing from the document
+# (numbers_matched < numbers_total) and the document does not hold most of the
+# question as one contiguous run (lcs_ratio < VARIANT_MAX_LCS_RATIO). The cap is
+# high on purpose: template variants often share long stretches of wording, such
+# as a figure description, and differ only in their numbers.
+VARIANT_MAX_LCS_RATIO = 0.9
+
+
 class ExactMatchSummary(BaseModel):
     """Exact-channel matches in the sampled records (``contaminated_docs/``).
 
@@ -109,6 +126,24 @@ class ExactMatchSummary(BaseModel):
     all_choices: int = 0
     some_choices: int = 0
     no_choices: int = 0
+
+
+class TemplateVariantRow(BaseModel):
+    """A flagged (document, item) pair that looks like a template variant of the
+    item rather than a copy (see ``VARIANT_MAX_LCS_RATIO``)."""
+
+    shard: str
+    doc_id: str
+    item_idx: int
+    item_id: str | None = None
+    benchmark: str | None = None
+    channel: str
+    hits: int | None = None
+    item_coverage: float | None = None
+    numbers_matched: int
+    numbers_total: int
+    lcs_chars: int | None = None
+    lcs_ratio: float
 
 
 class LeakByBenchmarkRow(BaseModel):
@@ -222,6 +257,10 @@ class ReportPayload(BaseModel):
     # Exact-channel matches among the sampled records; None when no record
     # carries one.
     exact_matches: ExactMatchSummary | None = None
+    # Number of (document, item) pairs with --confirm evidence in the sampled
+    # records, and the likely template variants among them.
+    confirmed_pairs: int = 0
+    template_variants: list[TemplateVariantRow] = Field(default_factory=list)
     bad_shards: BadShards
     examples: ExamplesSection
     warnings: list[str]
@@ -629,11 +668,19 @@ def _build_field_matches(
     return summary
 
 
-def _build_exact_matches(layout: OutputLayout) -> ExactMatchSummary | None:
-    """Exact matches in the sampled records; None when there are none."""
+def _build_text_evidence(
+    layout: OutputLayout, *, items_meta: list[dict[str, Any]] | None
+) -> tuple[ExactMatchSummary | None, int, list[TemplateVariantRow]]:
+    """Exact matches and likely template variants in the sampled records."""
     exact = ExactMatchSummary()
     exact_items: set[int] = set()
+    confirmed = 0
+    variants: list[TemplateVariantRow] = []
+    meta = items_meta or []
     for path in sorted(layout.contaminated_dir.glob("*.ndjson")):
+        shard = path.name.removesuffix(".decontam.sample.ndjson").removesuffix(
+            ".ndjson"
+        )
         with path.open("r", encoding="utf-8") as handle:
             for line in handle:
                 if not line.strip():
@@ -657,8 +704,38 @@ def _build_exact_matches(layout: OutputLayout) -> ExactMatchSummary | None:
                             exact.some_choices += 1
                         else:
                             exact.no_choices += 1
+                pairs = [("ngram", hit) for hit in record.item_hits]
+                pairs += [("exact", hit) for hit in record.exact_hits]
+                for channel, hit in pairs:
+                    if hit.numbers_total is None or hit.lcs_ratio is None:
+                        continue
+                    confirmed += 1
+                    if not (
+                        hit.numbers_total > 0
+                        and (hit.numbers_matched or 0) < hit.numbers_total
+                        and hit.lcs_ratio < VARIANT_MAX_LCS_RATIO
+                    ):
+                        continue
+                    item = meta[hit.item_id] if hit.item_id < len(meta) else {}
+                    variants.append(
+                        TemplateVariantRow(
+                            shard=shard,
+                            doc_id=str(record.doc_id),
+                            item_idx=hit.item_id,
+                            item_id=item.get("item_id"),
+                            benchmark=item.get("benchmark"),
+                            channel=channel,
+                            hits=getattr(hit, "hits", None),
+                            item_coverage=getattr(hit, "item_coverage", None),
+                            numbers_matched=hit.numbers_matched or 0,
+                            numbers_total=hit.numbers_total,
+                            lcs_chars=hit.lcs_chars,
+                            lcs_ratio=hit.lcs_ratio,
+                        )
+                    )
     exact.items_matched = len(exact_items)
-    return exact if exact.exact_hits else None
+    variants.sort(key=lambda r: (r.lcs_ratio, -(r.hits or 0), r.shard, r.doc_id))
+    return (exact if exact.exact_hits else None), confirmed, variants
 
 
 def _build_bad_shards(
@@ -766,6 +843,7 @@ def _render_markdown_report(
             if run_cfg.exact_channel != "off"
             else ""
         ),
+        f"- Confirm: `{'on' if run_cfg.confirm else 'off'}`",
         f"- {stopgrams_line}",
         "",
         "## Scan summary",
@@ -894,6 +972,44 @@ def _render_markdown_report(
             ]
         )
 
+    if report.confirmed_pairs:
+        lines.extend(
+            [
+                "## Likely template variants (sampled records)",
+                "",
+                f"Of {report.confirmed_pairs} flagged (document, item) pairs checked "
+                f"with `--confirm`, {len(report.template_variants)} miss some of the "
+                "item's numbers and do not hold most of its question as one run "
+                f"(longest common substring below {VARIANT_MAX_LCS_RATIO:.0%} of the "
+                "question): likely other problems from the same template rather "
+                "than copies. Review them before counting them as contamination.",
+                "",
+            ]
+        )
+        if report.template_variants:
+            lines.extend(
+                [
+                    "| Doc | Item | Benchmark | Channel | Hits | Numbers matched | "
+                    "LCS ratio |",
+                    "| --- | --- | --- | --- | --- | --- | --- |",
+                ]
+            )
+            for row in report.template_variants[:20]:
+                lines.append(
+                    "| {doc} | {item} | {bench} | {channel} | {hits} | "
+                    "{nm}/{nt} | {lcs:.2f} |".format(
+                        doc=row.doc_id.replace("|", "\\|"),
+                        item=(row.item_id or str(row.item_idx)).replace("|", "\\|"),
+                        bench=(row.benchmark or "?").replace("|", "\\|"),
+                        channel=row.channel,
+                        hits=row.hits if row.hits is not None else "-",
+                        nm=row.numbers_matched,
+                        nt=row.numbers_total,
+                        lcs=row.lcs_ratio,
+                    )
+                )
+            lines.extend(["", "See `template_variants.csv` for the full list.", ""])
+
     lines.extend(
         [
             "## Worst leaking shards (overall, top 10)",
@@ -1001,6 +1117,17 @@ def _write_report_artifacts(
         layout.leak_by_item_json,
         [row.model_dump(mode="json") for row in leak_by_item],
     )
+
+    _write_json(
+        layout.template_variants_json,
+        [row.model_dump(mode="json") for row in report.template_variants],
+    )
+    with layout.template_variants_csv.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(TemplateVariantRow.model_fields))
+        writer.writeheader()
+        writer.writerows(
+            [row.model_dump(mode="json") for row in report.template_variants]
+        )
 
     with layout.leak_by_benchmark_csv.open("w", newline="", encoding="utf-8") as f:
         fieldnames = [
@@ -1151,10 +1278,14 @@ def generate_report_from_scan_dir(
 
     examples = _build_examples(layout, scan_dir=scan_dir_path)
     field_matches = _build_field_matches(layout, index_path=index_path)
-    # Only scans with the exact channel carry exact hits.
+    # Only scans with the item text channels carry exact hits or confirmation.
     exact_matches: ExactMatchSummary | None = None
-    if manifest.config.exact_channel != "off":
-        exact_matches = _build_exact_matches(layout)
+    confirmed_pairs = 0
+    template_variants: list[TemplateVariantRow] = []
+    if manifest.config.exact_channel != "off" or manifest.config.confirm:
+        exact_matches, confirmed_pairs, template_variants = _build_text_evidence(
+            layout, items_meta=items_meta
+        )
 
     warnings: list[str] = []
 
@@ -1184,6 +1315,8 @@ def generate_report_from_scan_dir(
         leak_by_item=leak_by_item,
         field_matches=field_matches,
         exact_matches=exact_matches,
+        confirmed_pairs=confirmed_pairs,
+        template_variants=template_variants,
         bad_shards=bad_shards,
         examples=examples,
         warnings=warnings,

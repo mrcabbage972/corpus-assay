@@ -106,6 +106,13 @@ _EXACT_MIN_CHARS_HELP = (
     "Shortest question, in characters after light normalization, the exact "
     "channel matches (shorter stems are too generic)."
 )
+_CONFIRM_HELP = (
+    "Report, for each flagged (document, item) pair, the item's numbers found in "
+    "the document (numbers_matched / numbers_total) and the longest common "
+    "substring with its question (lcs_chars, lcs_ratio), to tell copies from "
+    "template variants. Report only: never changes which documents are flagged. "
+    "Needs the index's .items.text.jsonl sidecar."
+)
 _ALLOW_EMPTY_BENCHMARKS_HELP = (
     "Build the index even if a benchmark loads no rows or indexes no n-grams "
     "(by default the build fails and writes nothing)."
@@ -459,6 +466,12 @@ class ScanOptions(NamedTuple):
         help=_EXACT_MIN_CHARS_HELP,
         show_default="the config's exact_min_chars, 12",
     )
+    confirm: bool | None = typer.Option(
+        None,
+        "--confirm/--no-confirm",
+        help=_CONFIRM_HELP,
+        show_default="the config's confirm, off",
+    )
     max_return_records: int = typer.Option(
         500,
         min=0,
@@ -610,6 +623,7 @@ def _scan_config_from_options(
             if opts.exact_min_chars is None
             else opts.exact_min_chars
         ),
+        confirm=cfg.confirm if opts.confirm is None else opts.confirm,
         **extra,
     )
     try:
@@ -962,7 +976,7 @@ def inspect_index_cmd(
         + (
             "present"
             if info.get("items_text")
-            else "missing (rebuild the index for --exact-channel)"
+            else "missing (rebuild the index for --exact-channel and --confirm)"
         )
     )
     stop = info.get("item_stopgrams")

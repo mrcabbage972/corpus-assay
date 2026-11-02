@@ -486,7 +486,8 @@ def write_item_texts(path: Path, result: BuildIndexResult) -> None:
     One line per item, in item order: ``{item_idx, benchmark, item_id, fields}``,
     where ``fields`` holds the raw (not normalized) text of each spec field in
     spec order, ``""`` when empty, or a list of strings for a list-valued field
-    (each multiple-choice option on its own). The exact-match channel reads it.
+    (each multiple-choice option on its own). The exact-match channel and
+    ``--confirm`` read it.
     """
     items_meta = result.attribution.items_meta
     with path.open("w", encoding="utf-8") as f:

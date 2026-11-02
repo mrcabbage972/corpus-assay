@@ -620,7 +620,7 @@ MC_TEMPLATE = (
 MC_LONG = {"question": MC_TEMPLATE.format(a=7, b=14), "choices": ["49 pi", "98"]}
 
 
-def test_exact_channel(tmp_path: Path, env: dict[str, str]) -> None:
+def test_exact_channel_and_confirm(tmp_path: Path, env: dict[str, str]) -> None:
     items = tmp_path / "mc.jsonl"
     items.write_text(
         "".join(json.dumps(i) + "\n" for i in (MC_SHORT, MC_LONG)), encoding="utf-8"
@@ -672,8 +672,14 @@ def test_exact_channel(tmp_path: Path, env: dict[str, str]) -> None:
     assert [r["doc_id"] for r in _records(plain)] == ["m1-part-0", "m2-part-0"]
     assert all(r["channels"] == ["ngram"] for r in _records(plain))
 
+    # --confirm alone never changes which documents are flagged.
+    confirmed = tmp_path / "mc_confirm"
+    _cli(*base, "--out-dir", str(confirmed), "--confirm", env=env)
+    assert _summary(confirmed)["total_contaminated"] == 2
+    assert [r["doc_id"] for r in _records(confirmed)] == ["m1-part-0", "m2-part-0"]
+
     out = tmp_path / "mc_exact"
-    _cli(*base, "--out-dir", str(out), "--exact-channel", "short", env=env)
+    _cli(*base, "--out-dir", str(out), "--exact-channel", "short", "--confirm", env=env)
     summary = _summary(out)
     assert summary["total_contaminated"] == 3
     assert summary["total_contaminated_by_channel"] == {"exact": 1, "ngram": 2}
@@ -683,10 +689,15 @@ def test_exact_channel(tmp_path: Path, env: dict[str, str]) -> None:
     (ehit,) = exact["exact_hits"]
     assert (ehit["item_id"], ehit["choices_found"], ehit["choices_total"]) == (0, 3, 3)
     copy_hit = records["m1-part-0"]["item_hits"][0]
+    variant_hit = records["m2-part-0"]["item_hits"][0]
     assert (copy_hit["choices_found"], copy_hit["choices_total"]) == (0, 2)
+    assert (copy_hit["numbers_matched"], copy_hit["numbers_total"]) == (2, 2)
+    assert (variant_hit["numbers_matched"], variant_hit["numbers_total"]) == (0, 2)
+    assert variant_hit["lcs_ratio"] < copy_hit["lcs_ratio"] == 1.0
     manifest = json.loads((out / "_RUN_MANIFEST.json").read_text("utf-8"))
     assert manifest["scan_config"]["exact_channel"] == "short"
     assert manifest["scan_config"]["exact_min_chars"] == 12
+    assert manifest["scan_config"]["confirm"] is True
 
     _cli("inspect-run", "--scan-dir", str(out), env=env)
     _cli("report", "--scan-dir", str(out), env=env)
@@ -697,9 +708,15 @@ def test_exact_channel(tmp_path: Path, env: dict[str, str]) -> None:
     }
     assert report["exact_matches"]["exact_hits"] == 1
     assert report["exact_matches"]["all_choices"] == 1
+    assert report["confirmed_pairs"] == 3
+    (variant,) = report["template_variants"]
+    assert (variant["doc_id"], variant["item_id"]) == ("m2-part-0", "MC#1")
     md = (out / "report" / "report.md").read_text("utf-8")
     assert "## Exact matches (sampled records)" in md
+    assert "## Likely template variants (sampled records)" in md
     assert "- Exact channel: `short` (min chars `12`)" in md
+    with (out / "report" / "template_variants.csv").open(encoding="utf-8") as f:
+        assert [row["doc_id"] for row in csv.DictReader(f)] == ["m2-part-0"]
 
     # An index built before the item text sidecar: a clear error, only when the
     # feature is asked for.

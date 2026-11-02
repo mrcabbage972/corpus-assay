@@ -36,9 +36,10 @@ class DecontaminationConfig(BaseModel):
     # Share of one item's n-grams a document must hold (with >= min_hits hits) to
     # be flagged whatever its document coverage; 0 turns it off. See ScanConfig.
     min_item_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
-    # Exact-match channel; see ScanConfig.
+    # Exact-match channel and copy-vs-variant confirmation; see ScanConfig.
     exact_channel: ExactChannel = "off"
     exact_min_chars: int = Field(default=DEFAULT_EXACT_MIN_CHARS, ge=1)
+    confirm: bool = False
     background: "BackgroundConfig | None" = None
     stopgrams: "StopGramsConfig | None" = None
     spaced: "SpacedSeedsConfig | None" = None
@@ -146,6 +147,10 @@ class ScanConfig(BaseModel):
     # Needs the `.items.text.jsonl` sidecar.
     exact_channel: ExactChannel = "off"
     exact_min_chars: int = Field(default=DEFAULT_EXACT_MIN_CHARS, ge=1)
+    # Report-only copy-vs-variant evidence for every flagged (doc, item) pair:
+    # the item's numbers found in the doc and the longest common substring.
+    # Never changes which documents are flagged. Needs `.items.text.jsonl`.
+    confirm: bool = False
 
     @field_validator("index_backend")
     @classmethod

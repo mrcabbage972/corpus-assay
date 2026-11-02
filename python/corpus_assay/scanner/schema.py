@@ -83,10 +83,13 @@ class ItemHit(BaseModel):
     # spec fields with a hit, and those fields' names (when the index lists them).
     field_hits: list[tuple[int, int]] = Field(default_factory=list)
     fields_matched: list[str] = Field(default_factory=list)
-    # v3, with the exact channel: the item's other fields found near the
-    # question (see ExactHit).
+    # v3, with the exact channel or --confirm: see TextEvidence.
     choices_found: int | None = Field(default=None, ge=0)
     choices_total: int | None = Field(default=None, ge=0)
+    numbers_total: int | None = Field(default=None, ge=0)
+    numbers_matched: int | None = Field(default=None, ge=0)
+    lcs_chars: int | None = Field(default=None, ge=0)
+    lcs_ratio: float | None = Field(default=None, ge=0.0)
 
 
 class ExactHit(BaseModel):
@@ -95,7 +98,7 @@ class ExactHit(BaseModel):
 
     ``choices_found`` / ``choices_total``: the item's other fields (each option
     of a list field separately) found within 1,000 characters of the matched
-    question.
+    question. ``numbers_*`` / ``lcs_*`` come with ``--confirm``.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -103,6 +106,10 @@ class ExactHit(BaseModel):
     field: int = Field(default=0, ge=0)
     choices_found: int | None = Field(default=None, ge=0)
     choices_total: int | None = Field(default=None, ge=0)
+    numbers_total: int | None = Field(default=None, ge=0)
+    numbers_matched: int | None = Field(default=None, ge=0)
+    lcs_chars: int | None = Field(default=None, ge=0)
+    lcs_ratio: float | None = Field(default=None, ge=0.0)
 
 
 class ItemBest(BaseModel):

@@ -30,6 +30,7 @@ def scan_stream_rust(
     out_item_best_path: str | None = None,
     exact_channel: str = "off",
     exact_min_chars: int = 12,
+    confirm: bool = False,
     channel_counts: dict[str, int] | None = None,
 ) -> tuple[int, int, list[str], int]:
     """Scan a Parquet stream; returns ``(scanned, contaminated, records, empty)``.
@@ -44,8 +45,9 @@ def scan_stream_rust(
     single-document coverage of each item with a hit (needs item postings).
 
     ``exact_channel`` (``off`` / ``short`` / ``all``) turns on the exact-match
-    channel over questions of at least ``exact_min_chars`` characters; it needs
-    the index's ``.items.text.jsonl``. ``channel_counts``, when given, receives the flagged
+    channel over questions of at least ``exact_min_chars`` characters, and
+    ``confirm`` the copy-vs-variant evidence; both need the index's
+    ``.items.text.jsonl``. ``channel_counts``, when given, receives the flagged
     sub-documents per enabled channel (``ngram``, ``spaced``, ``exact``).
     """
 
@@ -53,6 +55,9 @@ def set_ngram_config_path(path: str) -> None: ...
 def normalize_text(s: str) -> list[str]: ...
 def light_normalize(s: str) -> str:
     """NFKC, lowercase, whitespace runs collapsed to one space, trimmed."""
+
+def longest_common_substring(a: str, b: str) -> int:
+    """Longest common substring, in characters, of two light-normalized texts."""
 
 def ngram_allowed(ngram: str) -> bool: ...
 def hash_ngram(ngram: str) -> int: ...

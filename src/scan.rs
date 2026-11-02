@@ -1,6 +1,6 @@
 use crate::exact::{
-    choices_near, find_bounded, get_exact_matcher, get_item_texts, items_text_exists,
-    items_text_path, ExactMatcher, ExactMode, ItemTexts,
+    choices_near, confirm, find_bounded, get_exact_matcher, get_item_texts, items_text_exists,
+    items_text_path, number_tokens, ExactMatcher, ExactMode, ItemTexts,
 };
 use crate::formats::{write_header, FileType};
 use crate::index::{get_attr_index, get_hash_index, get_index_ngram};
@@ -37,17 +37,27 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// Evidence from the item's raw text (`.items.text.jsonl`), computed for the
-/// records written when the exact channel is on.
+/// records written when the exact channel or `--confirm` is on.
 ///
 /// `choices_found` / `choices_total`: the item's other fields (each element of
 /// a list field separately) found within 1,000 characters of the matched
-/// question.
+/// question. `numbers_*` and `lcs_*` (`--confirm` only): the question's distinct
+/// numbers found in the sub-document, and the longest common substring of the
+/// question and the sub-document, in characters and as a share of the question.
 #[derive(Serialize, Clone, Default)]
 struct TextEvidence {
     #[serde(skip_serializing_if = "Option::is_none")]
     choices_found: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     choices_total: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    numbers_total: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    numbers_matched: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lcs_chars: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lcs_ratio: Option<f64>,
 }
 
 /// An exact-channel match: the item's question (field 0) occurs verbatim, after
@@ -193,8 +203,8 @@ struct PreparedScan {
     /// Optional spaced-seed recall channel: a doc is flagged when the exact gate fires
     /// OR the spaced verifier matches (union recall). `None` disables the channel.
     spaced: Option<Arc<SpacedIndex>>,
-    /// Item text channels (exact match, choices); `None` unless the exact
-    /// channel is on.
+    /// Item text channels (exact match, choices, confirmation); `None` unless
+    /// the exact channel or `--confirm` is on.
     text: Option<TextChannels>,
 }
 
@@ -204,6 +214,8 @@ struct TextChannels {
     texts: Arc<ItemTexts>,
     /// The exact-match automaton (`None`: exact channel off).
     matcher: Option<Arc<ExactMatcher>>,
+    /// Compute the copy-vs-variant confirmation for each flagged pair.
+    confirm: bool,
 }
 
 #[derive(Clone)]
@@ -725,7 +737,7 @@ impl Scorer {
 }
 
 /// Fill the text evidence of a written record: choices near the question for
-/// every n-gram item hit and exact hit.
+/// every n-gram item hit and exact hit, and the confirmation with `--confirm`.
 /// `light` is the sub-document's light-normalized text.
 ///
 /// The question's location is the exact match when there is one; for an n-gram
@@ -737,16 +749,31 @@ fn text_evidence(
     item_hits: &mut [ItemHit],
     exact: &[(u32, usize, usize)],
 ) -> Vec<ExactHit> {
+    let doc_numbers = if text.confirm {
+        number_tokens(light)
+    } else {
+        HashSet::new()
+    };
     let evidence = |item: u32, span: Option<(usize, usize)>| -> TextEvidence {
         let Some(item_text) = text.texts.get(item) else {
             return TextEvidence::default();
         };
         let span = span.or_else(|| find_bounded(light, 0, light.len(), &item_text.question));
         let (found, total) = choices_near(item_text, light, span);
-        TextEvidence {
+        let mut ev = TextEvidence {
             choices_found: Some(found),
             choices_total: Some(total),
+            ..TextEvidence::default()
+        };
+        if text.confirm {
+            if let Some(c) = confirm(item_text, light, &doc_numbers) {
+                ev.numbers_total = Some(c.numbers_total);
+                ev.numbers_matched = Some(c.numbers_matched);
+                ev.lcs_chars = Some(c.lcs_chars);
+                ev.lcs_ratio = Some(c.lcs_ratio);
+            }
         }
+        ev
     };
     for hit in item_hits.iter_mut() {
         let span = exact
@@ -1287,6 +1314,7 @@ fn prepare_scan(
     out_item_best_path: Option<&str>,
     exact_channel: &str,
     exact_min_chars: usize,
+    confirm: bool,
 ) -> PyResult<PreparedScan> {
     if min_hits == 0 {
         return Err(PyValueError::new_err("min_hits must be >= 1"));
@@ -1411,12 +1439,18 @@ fn prepare_scan(
     if exact_min_chars == 0 {
         return Err(PyValueError::new_err("exact_min_chars must be >= 1"));
     }
-    let text = if exact_mode.is_some() {
+    let text = if exact_mode.is_some() || confirm {
         if !items_text_exists(index_path) {
+            let feature = if exact_mode.is_some() {
+                "the exact-match channel (exact_channel)"
+            } else {
+                "confirm"
+            };
             return Err(PyValueError::new_err(format!(
-                "the exact-match channel (exact_channel) needs the item text sidecar \
-                 '{}', which this index lacks (it predates the sidecar). Rebuild the \
-                 index with build-index; run / run-hf rebuild their cached index.",
+                "{} needs the item text sidecar '{}', which this index lacks (it \
+                 predates the sidecar). Rebuild the index with build-index; run / \
+                 run-hf rebuild their cached index.",
+                feature,
                 items_text_path(index_path)
             )));
         }
@@ -1432,7 +1466,11 @@ fn prepare_scan(
             )?),
             None => None,
         };
-        Some(TextChannels { texts, matcher })
+        Some(TextChannels {
+            texts,
+            matcher,
+            confirm,
+        })
     } else {
         None
     };
@@ -1514,7 +1552,7 @@ fn pyfile_to_tempfile(obj: &Bound<'_, PyAny>) -> PyResult<File> {
 
 #[allow(clippy::too_many_arguments)]
 #[pyfunction]
-#[pyo3(signature = (input, text_key, id_key, index_path, n, min_hits, min_coverage, index_backend="auto", out_hits_path=None, packed_doc_sep=Some("<|endoftext|>"), packed_doc_sep_typo=Some("<|endoftext}>"), max_return_records=Some(500), stopgrams_path=None, gate_mode="auto", min_longest_run=0, spaced_path=None, spaced_min_loci=3, spaced_ver_min_span=17, spaced_ver_identity=0.85, boilerplate_threshold=50, messages_key=None, min_item_coverage=0.0, out_item_best_path=None, exact_channel="off", exact_min_chars=12, channel_counts=None))]
+#[pyo3(signature = (input, text_key, id_key, index_path, n, min_hits, min_coverage, index_backend="auto", out_hits_path=None, packed_doc_sep=Some("<|endoftext|>"), packed_doc_sep_typo=Some("<|endoftext}>"), max_return_records=Some(500), stopgrams_path=None, gate_mode="auto", min_longest_run=0, spaced_path=None, spaced_min_loci=3, spaced_ver_min_span=17, spaced_ver_identity=0.85, boilerplate_threshold=50, messages_key=None, min_item_coverage=0.0, out_item_best_path=None, exact_channel="off", exact_min_chars=12, confirm=false, channel_counts=None))]
 pub fn scan_stream_rust(
     py: Python<'_>,
     input: Bound<'_, PyAny>,
@@ -1542,6 +1580,7 @@ pub fn scan_stream_rust(
     out_item_best_path: Option<&str>,
     exact_channel: &str,
     exact_min_chars: usize,
+    confirm: bool,
     channel_counts: Option<Bound<'_, PyDict>>,
 ) -> PyResult<(usize, usize, Vec<String>, usize)> {
     // `text_key` is one column name or a list of them.
@@ -1574,6 +1613,7 @@ pub fn scan_stream_rust(
         out_item_best_path,
         exact_channel,
         exact_min_chars,
+        confirm,
     )?;
     let channels_on = [
         true,

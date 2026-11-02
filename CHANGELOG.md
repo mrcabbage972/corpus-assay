@@ -80,11 +80,11 @@ All notable changes to this project are documented here. The format follows
 - **Item text sidecar** `<index>.native.items.text.jsonl`, written by `build-index`:
   one JSON line per item, `{item_idx, benchmark, item_id, fields}`, with each spec
   field's raw text (a list of strings for a list-valued field, such as
-  multiple-choice options). The exact channel reads it. The index
+  multiple-choice options). The exact channel and `--confirm` read it. The index
   meta lists it under `files.items_text`, the run fingerprint hashes it, and
   `inspect-index` says whether it is present. **Existing indexes lack it and must be
-  rebuilt to use `--exact-channel`** (they still scan without it, and the flag
-  stops with an error that says so); `run` / `run-hf` rebuild a cached index
+  rebuilt to use `--exact-channel` or `--confirm`** (they still scan without them, and
+  those flags stop with an error that says so); `run` / `run-hf` rebuild a cached index
   without it.
 - Exact-match channel (#1). `--exact-channel short|all` (on `scan`, `run`, `run-hf`;
   config key `exact_channel`; default `off`, so existing results do not change)
@@ -105,15 +105,25 @@ All notable changes to this project are documented here. The format follows
   `total_contaminated_by_channel`: flagged sub-documents per enabled channel; older
   summaries still load. `report` shows them, and counts the exact matches of the
   sampled records (`exact_matches`). `hits.bin` stays n-gram only. `scan_stream_rust`
-  takes `exact_channel`, `exact_min_chars` and a `channel_counts` dict it fills.
-- Choices near the question (rest of #3). With the exact channel,
+  takes `exact_channel`, `exact_min_chars`, `confirm` and a `channel_counts` dict it
+  fills.
+- Choices near the question (rest of #3). With the exact channel or `--confirm`,
   every `exact_hits` and `item_hits` entry of a written record carries
   `choices_found` / `choices_total`: how many of the item's other fields (each option
   of a list field on its own) occur within 1,000 characters of the matched question
   (for an n-gram hit, of the question's first verbatim occurrence, or anywhere in the
   sub-document when it has none).
-- The run manifest's `scan_config` records `exact_channel` and `exact_min_chars`
-  (absent in older manifests: off).
+- Copy-vs-variant confirmation (#4). `--confirm` (config `confirm`; default off)
+  adds to every flagged (document, item) pair of the written records
+  `numbers_total` / `numbers_matched` (the distinct numbers of the item's question,
+  and those found in the sub-document as whole tokens) and `lcs_chars` / `lcs_ratio`
+  (the longest common substring of the question and the sub-document, computed with a
+  suffix automaton, linear in the document). It is report only: the flagged documents
+  are the same with and without it. `report` lists the likely template variants
+  (some numbers missing and `lcs_ratio < 0.9`) in `report.md`, `report.json`
+  (`confirmed_pairs`, `template_variants`) and `template_variants.csv` / `.json`.
+- The run manifest's `scan_config` records `exact_channel`, `exact_min_chars` and
+  `confirm` (absent in older manifests: off).
 
 ### Changed
 
@@ -164,7 +174,7 @@ All notable changes to this project are documented here. The format follows
   earlier version are re-scanned.
 - The order of the options in `scan`/`run`/`run-hf --help` changed slightly: the
   shared scan options are defined once and listed together.
-- `ScanConfig` gains `exact_channel` and `exact_min_chars`, so the resume
+- `ScanConfig` gains `exact_channel`, `exact_min_chars` and `confirm`, so the resume
   fingerprint of every run changes and shards scanned by an earlier version are
   re-scanned once.
 - Benchmark loaders' `load_positive_fields` yields a list of strings for a

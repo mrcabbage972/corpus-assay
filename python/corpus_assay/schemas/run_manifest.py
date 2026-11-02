@@ -31,9 +31,10 @@ class RunScanConfig(BaseModel):
     min_coverage: float
     # Per-item coverage threshold (0: off; absent in older manifests).
     min_item_coverage: float = 0.0
-    # Exact-match channel (absent in older manifests: off).
+    # Exact-match channel and --confirm (absent in older manifests: off).
     exact_channel: str = "off"
     exact_min_chars: int = 12
+    confirm: bool = False
     # None: packed-document splitting was off (--no-split).
     packed_doc_sep: str | None
     packed_doc_sep_typo: str | None

@@ -29,7 +29,7 @@ version from 3.12 up.
 | `lib.rs` | Python module definition (`corpus_assay._native`) |
 | `text.rs` | Normalization (NFKC, regex tokens, stop words), the light normalization of the exact channel, reject patterns, BLAKE2b-64 n-gram hashing, normalization-config staging |
 | `scan.rs` | The scanner: Parquet batches via Arrow, packed-document splitting, gates, per-item evidence, hit and record output |
-| `exact.rs` | The item text sidecar (`.items.text.jsonl`), the exact-match Aho-Corasick channel, and choices near the question |
+| `exact.rs` | The item text sidecar (`.items.text.jsonl`), the exact-match Aho-Corasick channel, choices near the question, and the `--confirm` evidence (numbers, longest common substring via a suffix automaton) |
 | `index.rs`, `mmap_index.rs`, `items_index.rs` | Load the `.native`, `.attr` (in memory or memory-mapped) and `.items` artifacts, with per-process caches |
 | `stopgrams.rs` | Memory-mapped stop-gram set |
 | `spaced.rs` | Experimental spaced-seed matcher and verifier |

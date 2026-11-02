@@ -70,6 +70,7 @@ def cfg(workdir: Path) -> Any:
                 "min_item_coverage": self.min_item_coverage,
                 "exact_channel": self.exact_channel,
                 "exact_min_chars": self.exact_min_chars,
+                "confirm": self.confirm,
             }
 
     return Cfg(
@@ -102,6 +103,7 @@ def cfg(workdir: Path) -> Any:
         min_item_coverage=0.0,
         exact_channel="off",
         exact_min_chars=12,
+        confirm=False,
     )
 
 
@@ -188,6 +190,7 @@ def patch_rust_scanner(monkeypatch: pytest.MonkeyPatch) -> None:
         out_item_best_path: str | None = None,
         exact_channel: str = "off",
         exact_min_chars: int = 12,
+        confirm: bool = False,
         channel_counts: dict[str, int] | None = None,
     ):
         # distinguish shards by stem (the hits path embeds it; JSONL input arrives

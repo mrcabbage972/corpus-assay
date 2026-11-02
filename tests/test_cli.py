@@ -53,6 +53,7 @@ def fake_decon_cfg() -> Any:
         min_item_coverage=0.0,
         exact_channel="off",
         exact_min_chars=12,
+        confirm=False,
         background=None,
         stopgrams=None,
         spaced=None,

@@ -153,6 +153,7 @@ def write_run_outputs(layout: OutputLayout, run: RunSummary, cfg: ScanConfig) ->
                 min_item_coverage=cfg.min_item_coverage,
                 exact_channel=cfg.exact_channel,
                 exact_min_chars=cfg.exact_min_chars,
+                confirm=cfg.confirm,
                 packed_doc_sep=cfg.packed_doc_sep,
                 packed_doc_sep_typo=cfg.packed_doc_sep_typo,
                 stopgrams_path=cfg.stopgrams_path,

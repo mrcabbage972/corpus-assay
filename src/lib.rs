@@ -24,6 +24,7 @@ fn corpus_assay(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(text::normalize_text, m)?)?;
     m.add_function(wrap_pyfunction!(text::light_normalize, m)?)?;
     m.add_function(wrap_pyfunction!(text::ngram_allowed, m)?)?;
+    m.add_function(wrap_pyfunction!(exact::longest_common_substring, m)?)?;
     m.add_function(wrap_pyfunction!(text::hash_ngram, m)?)?;
     m.add_function(wrap_pyfunction!(text::ngram_filter, m)?)?;
     m.add_function(wrap_pyfunction!(text::ngram_config_version, m)?)?;

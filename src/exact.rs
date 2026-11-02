@@ -5,7 +5,10 @@
 //!   each light-normalized sub-document with a word-boundary check;
 //! - **choices near the question**: whether each other field of an item (each
 //!   element, for list fields such as multiple-choice options) occurs within
-//!   [`CHOICE_WINDOW_CHARS`] characters of the matched question.
+//!   [`CHOICE_WINDOW_CHARS`] characters of the matched question;
+//! - **confirmation** of a (document, item) pair: the item's numbers found in
+//!   the document, and the longest common substring of the item's question and
+//!   the document (suffix automaton, linear in the document length).
 //!
 //! All of it works on [`light_normalize_rust`] text, which keeps numbers,
 //! operators, punctuation and stop words.
@@ -18,6 +21,7 @@ use hashbrown::{HashMap, HashSet};
 use once_cell::sync::Lazy;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use regex::Regex;
 use serde::Deserialize;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -25,6 +29,10 @@ use std::sync::{Arc, Mutex};
 
 /// Characters on either side of the matched question searched for its choices.
 pub const CHOICE_WINDOW_CHARS: usize = 1000;
+
+/// Number tokens: digit runs with an optional decimal part.
+static NUMBER_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"[0-9]+(?:\.[0-9]+)?").expect("valid number regex"));
 
 /// One field of an item as stored in the text sidecar: a string, or a list of
 /// strings (a list-valued field such as multiple-choice options).
@@ -49,6 +57,8 @@ pub struct ItemText {
     question_chars: usize,
     /// Every other field, each list element separately; empty ones dropped.
     pub choices: Vec<String>,
+    /// The distinct number tokens of the question.
+    numbers: Vec<String>,
 }
 
 impl ItemText {
@@ -69,10 +79,19 @@ impl ItemText {
             }
         }
         choices.retain(|c| !c.is_empty());
+        let mut seen = HashSet::new();
+        let numbers: Vec<String> = NUMBER_RE
+            .find_iter(&question)
+            .map(|m| m.as_str())
+            .filter(|n| seen.insert(*n))
+            .map(str::to_string)
+            .collect();
+        drop(seen);
         Self {
             question_chars: question.chars().count(),
             question,
             choices,
+            numbers,
         }
     }
 }
@@ -331,4 +350,150 @@ pub fn choices_near(item: &ItemText, text: &str, span: Option<(usize, usize)>) -
         .filter(|choice| find_bounded(text, lo, hi, choice).is_some())
         .count();
     (found, item.choices.len())
+}
+
+/// Copy-vs-variant evidence for one (document, item) pair.
+pub struct Confirmation {
+    pub numbers_total: usize,
+    pub numbers_matched: usize,
+    pub lcs_chars: usize,
+    pub lcs_ratio: f64,
+}
+
+/// The distinct number tokens of a light-normalized text.
+pub fn number_tokens(text: &str) -> HashSet<&str> {
+    NUMBER_RE.find_iter(text).map(|m| m.as_str()).collect()
+}
+
+/// Numbers of the item's question found in the document (as whole number
+/// tokens), and the longest common substring of the question and the document.
+/// `None` when the item has no question text.
+pub fn confirm(item: &ItemText, text: &str, doc_numbers: &HashSet<&str>) -> Option<Confirmation> {
+    if item.question_chars == 0 {
+        return None;
+    }
+    let numbers_matched = item
+        .numbers
+        .iter()
+        .filter(|n| doc_numbers.contains(n.as_str()))
+        .count();
+    let lcs_chars = SuffixAutomaton::new(&item.question).longest_common_substring(text);
+    Some(Confirmation {
+        numbers_total: item.numbers.len(),
+        numbers_matched,
+        lcs_chars,
+        lcs_ratio: lcs_chars as f64 / item.question_chars as f64,
+    })
+}
+
+/// Suffix automaton of a string (over characters), for the longest common
+/// substring with another string in time linear in that string's length.
+struct SuffixAutomaton {
+    len: Vec<usize>,
+    link: Vec<Option<usize>>,
+    next: Vec<Vec<(char, usize)>>,
+}
+
+impl SuffixAutomaton {
+    fn new(s: &str) -> Self {
+        let mut sam = Self {
+            len: vec![0],
+            link: vec![None],
+            next: vec![Vec::new()],
+        };
+        let mut last = 0usize;
+        for c in s.chars() {
+            last = sam.extend(last, c);
+        }
+        sam
+    }
+
+    fn go(&self, state: usize, c: char) -> Option<usize> {
+        self.next[state]
+            .iter()
+            .find(|&&(k, _)| k == c)
+            .map(|&(_, to)| to)
+    }
+
+    fn set(&mut self, state: usize, c: char, to: usize) {
+        match self.next[state].iter_mut().find(|(k, _)| *k == c) {
+            Some(slot) => slot.1 = to,
+            None => self.next[state].push((c, to)),
+        }
+    }
+
+    fn add_state(&mut self, len: usize, link: Option<usize>, next: Vec<(char, usize)>) -> usize {
+        self.len.push(len);
+        self.link.push(link);
+        self.next.push(next);
+        self.len.len() - 1
+    }
+
+    fn extend(&mut self, last: usize, c: char) -> usize {
+        let cur = self.add_state(self.len[last] + 1, None, Vec::new());
+        let mut p = Some(last);
+        while let Some(state) = p {
+            if self.go(state, c).is_some() {
+                break;
+            }
+            self.set(state, c, cur);
+            p = self.link[state];
+        }
+        let Some(state) = p else {
+            self.link[cur] = Some(0);
+            return cur;
+        };
+        let q = self.go(state, c).expect("transition checked above");
+        if self.len[state] + 1 == self.len[q] {
+            self.link[cur] = Some(q);
+            return cur;
+        }
+        let clone = self.add_state(self.len[state] + 1, self.link[q], self.next[q].clone());
+        let mut p = Some(state);
+        while let Some(s) = p {
+            if self.go(s, c) != Some(q) {
+                break;
+            }
+            self.set(s, c, clone);
+            p = self.link[s];
+        }
+        self.link[q] = Some(clone);
+        self.link[cur] = Some(clone);
+        cur
+    }
+
+    /// Length, in characters, of the longest substring of `text` that is also
+    /// a substring of the automaton's string.
+    fn longest_common_substring(&self, text: &str) -> usize {
+        let (mut state, mut cur, mut best) = (0usize, 0usize, 0usize);
+        for c in text.chars() {
+            loop {
+                if let Some(to) = self.go(state, c) {
+                    state = to;
+                    cur += 1;
+                    break;
+                }
+                match self.link[state] {
+                    Some(link) => {
+                        state = link;
+                        cur = self.len[state];
+                    }
+                    None => {
+                        cur = 0;
+                        break;
+                    }
+                }
+            }
+            best = best.max(cur);
+        }
+        best
+    }
+}
+
+/// Longest common substring, in characters, of the light normalizations of
+/// `a` and `b` (the `lcs_chars` of `--confirm`).
+#[pyfunction]
+pub fn longest_common_substring(a: &str, b: &str) -> usize {
+    SuffixAutomaton::new(&light_normalize_rust(a))
+        .longest_common_substring(&light_normalize_rust(b))
 }
