@@ -12,9 +12,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from corpus_assay.attribution import AttributionIndex
 from corpus_assay.config import ScanConfig
 from corpus_assay.scanner.fingerprint import library_version
-from corpus_assay.scanner.io import parse_contamination_record
+from corpus_assay.scanner.io import parse_contamination_record, read_item_best
 from corpus_assay.scanner.layout import OutputLayout
-from corpus_assay.scanner.schema import ScanSummary
+from corpus_assay.scanner.schema import ItemBest, ScanSummary
 from corpus_assay.schemas import RunStopGramsInfo
 
 logger = logging.getLogger(__name__)
@@ -112,6 +112,15 @@ class LeakByItemRow(BaseModel):
     leaked_unique: int
     leaked_shared: int
     leaked_boilerplate: int
+    # Best single-document hold on the item: the largest share of its n-grams
+    # any one scanned sub-document held (from per_item_best/), that
+    # sub-document's hits and id, and its shard. None for scans written before
+    # per_item_best/ existed. Compare with leak_fraction, which pools every
+    # document of the corpus.
+    best_doc_coverage: float | None = None
+    best_doc_hits: int | None = None
+    best_doc_id: str | None = None
+    best_doc_shard: str | None = None
 
 
 class FieldMatchSummary(BaseModel):
@@ -452,6 +461,21 @@ def _load_item_metadata(index_path: Path) -> list[dict[str, Any]] | None:
     return _load_json(items_meta_path).get("items", [])
 
 
+def _collect_item_best(layout: OutputLayout) -> dict[int, tuple[ItemBest, str]]:
+    """Per item, the best single-document hold over every shard, with its shard.
+
+    Ties keep the first shard in name order.
+    """
+    best: dict[int, tuple[ItemBest, str]] = {}
+    for path in sorted(layout.per_item_best_dir.glob("*.json")):
+        shard = path.name.removesuffix(".json")
+        for entry in read_item_best(path).items:
+            current = best.get(entry.item_id)
+            if current is None or entry.coverage > current[0].coverage:
+                best[entry.item_id] = (entry, shard)
+    return best
+
+
 def _build_leak_by_item(
     *,
     index_path: Path,
@@ -459,6 +483,7 @@ def _build_leak_by_item(
     items_meta: list[dict[str, Any]],
     id_to_name: list[str],
     boilerplate_threshold: int,
+    item_best: dict[int, tuple[ItemBest, str]] | None = None,
 ) -> list[LeakByItemRow]:
     # Exact, exhaustive per-item leak. We stream the static `.items` sidecar and keep
     # only hashes that actually leaked (the exhaustive hits.bin set from _collect_hits),
@@ -493,6 +518,7 @@ def _build_leak_by_item(
         meta = items_meta[it] if 0 <= it < len(items_meta) else {}
         benchmark = str(meta.get("benchmark", ""))
         n_protected = int(meta.get("n_protected_hashes", 0))
+        best = (item_best or {}).get(it)
         rows.append(
             LeakByItemRow(
                 item_idx=it,
@@ -505,6 +531,10 @@ def _build_leak_by_item(
                 leaked_unique=leaked_unique.get(it, 0),
                 leaked_shared=leaked_shared.get(it, 0),
                 leaked_boilerplate=leaked_boiler.get(it, 0),
+                best_doc_coverage=best[0].coverage if best else None,
+                best_doc_hits=best[0].hits if best else None,
+                best_doc_id=best[0].doc_id if best else None,
+                best_doc_shard=best[1] if best else None,
             )
         )
 
@@ -664,6 +694,9 @@ def _render_markdown_report(
         f"- N-gram: `{run_cfg.ngram}`",
         f"- Min hits: `{run_cfg.min_hits}`",
         f"- Min coverage: `{run_cfg.min_coverage}`",
+        f"- Gate mode: `{run_cfg.gate_mode}`",
+        f"- Min item coverage: `{run_cfg.min_item_coverage}`"
+        + (" (off)" if not run_cfg.min_item_coverage else ""),
         f"- {stopgrams_line}",
         "",
         "## Scan summary",
@@ -705,22 +738,29 @@ def _render_markdown_report(
                 "## Leak by item (top 10)",
                 "",
                 "Exact per-item leak (item hashes seen in the corpus / item hashes in "
-                "the index), split by hash fan-out. Exhaustive, not sampled.",
+                "the index), split by hash fan-out, and the best single-document "
+                "coverage (the largest share of the item's n-grams one document "
+                "held). Exhaustive, not sampled.",
                 "",
                 "| Item | Benchmark | Leaked | Protected | Leak fraction | "
-                "Unique/Shared/Boiler |",
-                "| --- | --- | --- | --- | --- | --- |",
+                "Best doc coverage | Unique/Shared/Boiler |",
+                "| --- | --- | --- | --- | --- | --- | --- |",
             ]
         )
         for row in report.leak_by_item[:10]:
             lines.append(
                 "| {item} | {benchmark} | {leaked} | {protected} | {fraction:.4%} | "
-                "{u}/{s}/{b} |".format(
+                "{best} | {u}/{s}/{b} |".format(
                     item=row.item_id.replace("|", "\\|"),
                     benchmark=row.benchmark.replace("|", "\\|"),
                     leaked=row.leaked_hashes,
                     protected=row.n_protected_hashes,
                     fraction=row.leak_fraction,
+                    best=(
+                        f"{row.best_doc_coverage:.2%}"
+                        if row.best_doc_coverage is not None
+                        else "n/a"
+                    ),
                     u=row.leaked_unique,
                     s=row.leaked_shared,
                     b=row.leaked_boilerplate,
@@ -885,6 +925,10 @@ def _write_report_artifacts(
             "leaked_unique",
             "leaked_shared",
             "leaked_boilerplate",
+            "best_doc_coverage",
+            "best_doc_hits",
+            "best_doc_id",
+            "best_doc_shard",
         ]
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -989,6 +1033,7 @@ def generate_report_from_scan_dir(
             items_meta=items_meta,
             id_to_name=id_to_name,
             boilerplate_threshold=manifest.config.boilerplate_threshold,
+            item_best=_collect_item_best(layout),
         )
 
     leak_by_shard = sorted(

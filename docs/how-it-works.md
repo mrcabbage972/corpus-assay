@@ -88,6 +88,15 @@ Each shard is processed by one worker process, in this order:
    - `item`: the same test, but `hits` counts the n-grams shared with a *single*
      protected item. Optionally, `--min-longest-run N` also requires a contiguous run of
      `N` tokens shared with that item.
+   - **Item coverage** (`--min-item-coverage C`, off by default). `min_coverage` is a
+     share of the *document's* n-grams, so a long document holding a whole item can
+     stay below it, and a short document can clear it with a fragment of an item.
+     Item coverage is a share of the *item's* n-grams: `item_coverage = hits /
+     item_ngrams` for the n-grams one document shares with one item. In `union` mode
+     a document is also flagged when one item has at least `min_hits` hits and
+     `item_coverage >= C`, whatever the document coverage (an OR path). In `item`
+     mode, `item_coverage >= C` is an extra requirement on the flagging item.
+     Stop-grams removed at scan time still count in `item_ngrams`.
    - Spaced seeds (experimental, opt-in): when the exact gate does not fire, the
      spaced-seed verifier can still flag the document. See
      [experimental-spaced-seeds.md](experimental-spaced-seeds.md).
@@ -104,7 +113,9 @@ Each shard is processed by one worker process, in this order:
    tells a copy of the whole item (a question with its choices) from one of the
    question alone.
 7. Every matched hash with its benchmark mask is written to `<shard>.hits.bin`. This is
-   exhaustive, not sampled, and it is what `report` aggregates.
+   exhaustive, not sampled, and it is what `report` aggregates. With item postings, the
+   best single-document coverage of each item hit in the shard goes to
+   `per_item_best/<shard>.json`.
 
 Workers are started with the `spawn` method. With more than one worker the index is
 memory-mapped (`--index-backend auto`), so the hash set is shared through the page cache
@@ -117,7 +128,9 @@ rather than copied into every process.
 - **By benchmark:** leaked distinct hashes / hashes in the index.
 - **By shard.**
 - **By item:** exact per-item leak fractions, split into unique, shared and boilerplate
-  hashes.
+  hashes, next to the best single-document coverage of the item (`best_doc_coverage`).
+  The leak fraction pools every document; the best document coverage says whether one
+  document holds the item.
 
 These counts cover every matched hash, not just the sampled records.
 

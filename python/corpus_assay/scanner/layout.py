@@ -34,8 +34,15 @@ class OutputLayout:
     def contaminated_dir(self) -> Path:
         return self.out_dir / "contaminated_docs"
 
+    @property
+    def per_item_best_dir(self) -> Path:
+        return self.out_dir / "per_item_best"
+
     def per_hits_path(self, stem: str) -> Path:
         return self.hits_dir / f"{stem}.hits.bin"
+
+    def per_item_best_path(self, stem: str) -> Path:
+        return self.per_item_best_dir / f"{stem}.json"
 
     def summary_path(self, stem: str) -> Path:
         return self.summaries_dir / f"{stem}.summary.json"
@@ -75,3 +82,4 @@ class OutputLayout:
         self.hits_dir.mkdir(parents=True, exist_ok=True)
         self.summaries_dir.mkdir(parents=True, exist_ok=True)
         self.contaminated_dir.mkdir(parents=True, exist_ok=True)
+        self.per_item_best_dir.mkdir(parents=True, exist_ok=True)

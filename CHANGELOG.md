@@ -46,6 +46,20 @@ All notable changes to this project are documented here. The format follows
   `ScanConfig.packed_doc_sep` and the Rust `scan_stream_rust` accept `None`, and the
   run manifest records `packed_doc_sep: null`.
 
+- Per-item coverage (#2). Records' `item_hits` entries gain `item_ngrams` (the
+  item's indexed n-grams) and `item_coverage = hits / item_ngrams`, the share of the
+  item one document holds. `--min-item-coverage C` (on `scan`, `run`, `run-hf`;
+  config key `min_item_coverage`; default 0, off) flags a document when one item has
+  at least `min_hits` hits and `item_coverage >= C`, whatever the document coverage,
+  in `union` mode (so a long document holding a whole item is caught); in `item` mode
+  it is an extra requirement on the flagging item. It needs the `.items` sidecar.
+  Union-mode evidence lists the items that pass this path too.
+- `per_item_best/<shard>.json`: for every item hit in a shard, the sub-document
+  holding the largest share of its n-grams, over every scanned sub-document. `report`
+  adds `best_doc_coverage` (with `best_doc_hits`, `best_doc_id`, `best_doc_shard`) to
+  `leak_by_item` next to `leak_fraction`, and `report.md` shows the gate mode and
+  `min_item_coverage`. The run manifest's `scan_config` records `min_item_coverage`.
+  `scan_stream_rust` takes `min_item_coverage` and `out_item_best_path`.
 - Which fields of an item matched (#3). Records' `item_hits` entries gain
   `field_hits` (`[field_idx, hits]` per matched spec field) and `fields_matched` (the
   field names), so a copy of a whole multiple-choice item (question and choices) is

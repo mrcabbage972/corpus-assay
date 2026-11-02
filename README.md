@@ -37,7 +37,8 @@ going to report on?*
 
 A document is flagged when it shares at least `min_hits` distinct word 13-grams with the
 benchmark index **and** those hits cover at least `min_coverage` of the document's
-distinct 13-grams. Matching runs on normalized text (Unicode NFKC, lowercased, stop
+distinct 13-grams. With `--min-item-coverage C`, a document holding at least a share `C`
+of one item's 13-grams is flagged too, however long it is. Matching runs on normalized text (Unicode NFKC, lowercased, stop
 words removed), so it survives casing, punctuation, and whitespace changes.
 
 This is a *verbatim-overlap* detector. Paraphrases, translations, and heavily edited
@@ -219,6 +220,7 @@ scan_out/
 ├── _RUN_MANIFEST.json              # full scan config, input hashes, tool versions
 ├── summaries/<shard>.summary.json  # per-shard counts (also the resume cache)
 ├── per_source_hits/<shard>.hits.bin
+├── per_item_best/<shard>.json      # best single-document coverage of each item hit
 ├── contaminated_docs/<shard>.decontam.sample.ndjson   # first 500 flagged per shard (--all-records: every one)
 └── report/                         # written by `report`
     ├── report.md / report.json

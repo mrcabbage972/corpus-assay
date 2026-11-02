@@ -10,6 +10,7 @@ benchmarks:            # required, at least one; at most 64 per index
 ngram: 13              # n-gram length (tokens)
 min_hits: 3            # distinct matching n-grams needed to flag a document
 min_coverage: 0.001    # matching / distinct n-grams in the document, in [0, 1]
+min_item_coverage: 0   # share of one item's n-grams a document holds; 0 = off
 background: ...        # optional: corpus for build-stopgrams-direct
 stopgrams: ...         # optional: stop-grams to apply during scans
 spaced: ...            # optional, experimental: spaced-seed index to apply during scans
@@ -205,6 +206,7 @@ passed. `run`/`run-hf` also key their index cache on that hash.
 | `--index-backend` | `auto` | `memory` or `mmap`; `auto` uses mmap when `workers > 1`. |
 | `--gate-mode` | `union` | `union` or `item` (see [how-it-works.md](how-it-works.md)). |
 | `--min-longest-run` | `0` | Item gate only: also require a contiguous shared run of N tokens. |
+| `--min-item-coverage` | config `min_item_coverage` (`0`, off) | Share of one item's n-grams a document must hold (`hits / item n-grams`, with at least `min_hits` hits). In `union` mode such a document is flagged whatever its document coverage; in `item` mode it is an extra requirement on the flagging item. Needs `.items`. |
 | `--boilerplate-threshold` | `50` | Item fan-out at which a matched n-gram counts as boilerplate in attribution. |
 | `--max-return-records` | `500` | Flagged records written per shard: a sample of the first N flagged. `0` removes the cap. |
 | `--all-records` | off | Write every flagged record (same as `--max-return-records 0`). |

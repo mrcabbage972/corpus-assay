@@ -85,6 +85,7 @@ normalization hashes.
 ├── _RUN_MANIFEST.json
 ├── summaries/<shard>.summary.json
 ├── per_source_hits/<shard>.hits.bin
+├── per_item_best/<shard>.json
 └── contaminated_docs/<shard>.decontam.sample.ndjson
 ```
 
@@ -103,6 +104,12 @@ normalization hashes.
 - **`per_source_hits/<shard>.hits.bin`** has a header of type 3, then
   `<u64 hash, u64 mask>` for **every** distinct matched hash in the shard. `report`
   aggregates these files.
+- **`per_item_best/<shard>.json`** (indexes with `.items`) lists, for every item with
+  at least one hit in the shard, the sub-document holding the largest share of its
+  n-grams, over every scanned sub-document (flagged or not):
+  `{"schema_version": 1, "items": [{"item_id": 7, "hits": 85, "item_ngrams": 90,
+  "coverage": 0.944, "doc_id": "doc500-part-0"}]}`. Ties keep the first
+  sub-document. `report` merges the shards into `best_doc_coverage`.
 - **`contaminated_docs/<shard>.decontam.sample.ndjson`** holds one JSON object per
   flagged sub-document. **By default this is a sample:** the first
   `--max-return-records` (500) flagged sub-documents of each shard, in scan order.
@@ -116,6 +123,7 @@ normalization hashes.
    "src_hits": [[0, 85]],
    "item_hits": [{"item_id": 7, "hits": 85, "longest_run_tokens": 75,
                   "unique_hits": 85, "shared_hits": 0, "boilerplate_hits": 0,
+                  "item_ngrams": 90, "item_coverage": 0.944,
                   "field_hits": [[0, 60], [1, 25]],
                   "fields_matched": ["question", "choices"]}],
    "field": "text"}
@@ -141,7 +149,10 @@ normalization hashes.
     are cast to strings.
   - `src_hits` contains `[benchmark_id, hits]` pairs.
   - `item_hits` is present when the index has item postings: one entry per item
-    that clears the gate on its own (`item_id` indexes `.items.meta.json`).
+    that clears the gate on its own, or that passes the `--min-item-coverage` path
+    (`item_id` indexes `.items.meta.json`). `item_ngrams` is the item's number of
+    indexed n-grams and `item_coverage = hits / item_ngrams`, the share of the item
+    the document holds (as opposed to `min_coverage`, a share of the document).
     `field_hits` lists `[field_idx, hits]` for each of the item's spec fields with a
     hit (a hash in two fields of the item counts in both), and `fields_matched`
     names them, so a copy of a whole multiple-choice item (question and choices)
@@ -153,7 +164,8 @@ normalization hashes.
     key). For a chat turn, `role` is the turn's role (omitted when it has none) and
     `turn` its index in the messages list, counted from 0.
   - Schema history: v3 added `field`, `role` and `turn`, and later the optional
-    `item_hits` fields `field_hits` and `fields_matched`; v2 added `item_hits` and
+    `item_hits` fields `item_ngrams`, `item_coverage`, `field_hits` and
+    `fields_matched`; v2 added `item_hits` and
     `spaced_item`. Readers (`inspect-run`, `report`) still accept v2 records.
 
 ## Reports (`report`)
@@ -171,4 +183,8 @@ normalization hashes.
 - **`leak_by_shard.csv` / `.json`:** unique leaked hashes per shard, per 1k documents.
 - **`leak_by_item.csv` / `.json`:** per item, `n_protected_hashes`, `leaked_hashes`,
   `leak_fraction`, and the unique, shared and boilerplate split. Requires the `.items`
-  sidecar.
+  sidecar. `best_doc_coverage` is the largest share of the item's n-grams any single
+  scanned sub-document held, with `best_doc_hits`, `best_doc_id` and
+  `best_doc_shard`; `leak_fraction` pools the whole corpus, so an item whose
+  n-grams are scattered over many documents has a high `leak_fraction` and a low
+  `best_doc_coverage`. These are empty for scans without `per_item_best/`.

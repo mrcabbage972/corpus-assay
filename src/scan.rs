@@ -37,7 +37,8 @@ use std::sync::{Arc, Mutex};
 /// `unique_hits` (n-gram belongs to exactly one protected item — strongest
 /// evidence), `shared_hits` (n-gram shared by a few items) and `boilerplate_hits`
 /// (n-gram present in `>= boilerplate_threshold` items — near-worthless), by the
-/// item fan-out of each matched hash.
+/// item fan-out of each matched hash. `item_coverage` is the share of the item's
+/// own indexed n-grams the document holds.
 ///
 /// `field_hits` lists `[field_idx, hits]` for each of the item's spec fields with
 /// at least one hit (a hash in several fields of the item counts in each), and
@@ -51,6 +52,10 @@ struct ItemHit {
     unique_hits: usize,
     shared_hits: usize,
     boilerplate_hits: usize,
+    /// The item's indexed n-grams, and the share of them the document holds
+    /// (`hits / item_ngrams`).
+    item_ngrams: usize,
+    item_coverage: f64,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     field_hits: Vec<(u32, usize)>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -136,15 +141,17 @@ struct PreparedScan {
     packed_doc_sep_typo: Option<String>,
     backend: IndexBackend,
     out_hits_path: Option<String>,
+    /// Where to write the shard's per-item best single-document coverage
+    /// (needs item postings).
+    out_item_best_path: Option<String>,
+    /// Whether per-item hits are counted for every sub-document with an index hit
+    /// (for `out_item_best_path`).
+    track_item_best: bool,
     n: usize,
-    min_hits: usize,
-    min_coverage: f64,
     stopgrams: Option<Arc<StopGramsSet>>,
-    gate_mode: GateMode,
-    min_longest_run: usize,
-    /// Item fan-out at/above which a matched n-gram is counted as boilerplate in
-    /// the per-item evidence split.
-    boilerplate_threshold: usize,
+    /// Gate mode and thresholds (`min_hits`, `min_coverage`, item coverage, run
+    /// length, and the boilerplate fan-out of the per-item evidence split).
+    item_gate: ItemGate,
     item_postings: Option<Arc<ItemPostings>>,
     /// Optional spaced-seed recall channel: a doc is flagged when the exact gate fires
     /// OR the spaced verifier matches (union recall). `None` disables the channel.
@@ -178,36 +185,45 @@ impl PreparedScan {
     }
 }
 
-/// Item-level gate: a doc is contaminated only if a *single* protected item
-/// accumulates `min_hits` distinct matching n-grams at `min_coverage` (and, when
-/// `min_longest_run > 0`, a contiguous shared run of that many tokens).
-///
-/// Returns `(flagged, report_count, evidence)` where `report_count` is the
-/// strongest single-item hit count and `evidence` is one `ItemHit` per item that
-/// on its own clears the gate. Each item's distinct hits are split into
-/// unique/shared/boilerplate by the item fan-out of each matched hash
-/// (`hash_to_items.len()`): `1` → unique, `>= boilerplate_threshold` → boilerplate,
-/// otherwise shared.
-#[allow(clippy::too_many_arguments)]
-fn item_gate(
-    postings: &ItemPostings,
-    indexed: &HashSet<u64>,
-    positions: &[(u64, usize)],
-    denom_all: f64,
+/// Thresholds of the per-item evidence and the item gate.
+#[derive(Clone)]
+struct ItemGate {
+    mode: GateMode,
     n: usize,
     min_hits: usize,
     min_coverage: f64,
+    /// Share of one item's n-grams a document must hold (0 disables). In union
+    /// mode it is an OR path to a flag; in item mode an extra per-item test.
+    min_item_coverage: f64,
     min_longest_run: usize,
     boilerplate_threshold: usize,
-    // Scratch buffers owned by the caller and reused across sub-documents to
-    // avoid per-doc heap allocation; cleared on entry. Value is the per-item
-    // (unique_hits, shared_hits, boilerplate_hits) split; total hits is their sum.
+}
+
+/// Outcome of the per-item tests for one sub-document.
+struct ItemVerdict {
+    /// Item mode: some item passes the item gate.
+    item_gate: bool,
+    /// Some item passes the coverage path (`min_hits` hits and
+    /// `item_coverage >= min_item_coverage`; document coverage not applied).
+    coverage_path: bool,
+    /// Strongest single-item hit count.
+    best_hits: usize,
+    /// One `ItemHit` per item that passes (union mode: the item gate without the
+    /// item-coverage test, or the coverage path).
+    evidence: Vec<ItemHit>,
+}
+
+/// Distinct matching hashes per protected item, bucketed by hash fan-out
+/// (`hash_to_items.len()`): `1` → unique, `>= boilerplate_threshold` →
+/// boilerplate, otherwise shared. `indexed` already restricts to hashes present
+/// in the active index, so a hash that exists only in a stale `.items` sidecar is
+/// ignored. `per_item_hits` is cleared first.
+fn count_item_hits(
+    postings: &ItemPostings,
+    indexed: &HashSet<u64>,
+    boilerplate_threshold: usize,
     per_item_hits: &mut HashMap<u32, (usize, usize, usize)>,
-    state: &mut HashMap<u32, (i64, usize, usize)>, // (last_pos, cur, best)
-) -> (bool, usize, Vec<ItemHit>) {
-    // Distinct matching hashes per protected item, bucketed by hash fan-out.
-    // `indexed` already restricts to hashes present in the active index, so a hash
-    // that exists only in a stale `.items` sidecar is ignored.
+) {
     per_item_hits.clear();
     for h in indexed.iter() {
         if let Some(items) = postings.hash_to_items.get(h) {
@@ -224,8 +240,36 @@ fn item_gate(
             }
         }
     }
+}
+
+/// Item-level tests over the per-item hits counted by [`count_item_hits`].
+///
+/// An item passes the *item gate* when it has `min_hits` distinct matching
+/// n-grams at document coverage `min_coverage` (and, when `min_longest_run > 0`,
+/// a contiguous shared run of that many tokens); in item mode it must also hold
+/// `min_item_coverage` of its own n-grams. It passes the *coverage path* when
+/// `min_item_coverage > 0`, it has `min_hits` hits and `hits / item_ngrams >=
+/// min_item_coverage`, whatever the document coverage.
+#[allow(clippy::too_many_arguments)]
+fn item_verdict(
+    gate: &ItemGate,
+    postings: &ItemPostings,
+    indexed: &HashSet<u64>,
+    positions: &[(u64, usize)],
+    denom_all: f64,
+    per_item_hits: &HashMap<u32, (usize, usize, usize)>,
+    // Scratch buffer owned by the caller, reused across sub-documents; cleared
+    // on entry.
+    state: &mut HashMap<u32, (i64, usize, usize)>, // (last_pos, cur, best)
+) -> ItemVerdict {
+    let mut verdict = ItemVerdict {
+        item_gate: false,
+        coverage_path: false,
+        best_hits: 0,
+        evidence: Vec::new(),
+    };
     if per_item_hits.is_empty() {
-        return (false, 0, Vec::new());
+        return verdict;
     }
 
     // Longest contiguous shared run (in n-grams) per item, over the positional
@@ -251,45 +295,63 @@ fn item_gate(
         }
     }
 
-    let mut best_hits = 0usize;
-    let mut flagged = false;
-    let mut evidence: Vec<ItemHit> = Vec::new();
     for (&item_id, &(unique_hits, shared_hits, boilerplate_hits)) in per_item_hits.iter() {
         let hits = unique_hits + shared_hits + boilerplate_hits;
-        if hits > best_hits {
-            best_hits = hits;
-        }
-        if hits < min_hits {
+        verdict.best_hits = verdict.best_hits.max(hits);
+        if hits < gate.min_hits {
             continue;
         }
-        if (hits as f64) / denom_all < min_coverage {
-            continue;
-        }
+        let item_ngrams = postings.ngrams_of(item_id);
+        let item_coverage = if item_ngrams > 0 {
+            hits as f64 / item_ngrams as f64
+        } else {
+            0.0
+        };
+        let holds_item = item_coverage >= gate.min_item_coverage;
+        let coverage_path = gate.min_item_coverage > 0.0 && holds_item;
+
         let run_ngrams = state.get(&item_id).map(|s| s.2).unwrap_or(0);
         let longest_run_tokens = if run_ngrams > 0 {
-            run_ngrams + n - 1
+            run_ngrams + gate.n - 1
         } else {
             0
         };
-        if min_longest_run > 0 && longest_run_tokens < min_longest_run {
+        let doc_ok = (hits as f64) / denom_all >= gate.min_coverage
+            && (gate.min_longest_run == 0 || longest_run_tokens >= gate.min_longest_run);
+
+        let passes = match gate.mode {
+            GateMode::Item => {
+                let ok = doc_ok && holds_item;
+                verdict.item_gate |= ok;
+                ok
+            }
+            GateMode::Union => {
+                verdict.coverage_path |= coverage_path;
+                doc_ok || coverage_path
+            }
+        };
+        if !passes {
             continue;
         }
-        evidence.push(ItemHit {
+        verdict.evidence.push(ItemHit {
             item_id,
             hits,
             longest_run_tokens,
             unique_hits,
             shared_hits,
             boilerplate_hits,
+            item_ngrams,
+            item_coverage,
             field_hits: Vec::new(),
             fields_matched: Vec::new(),
         });
-        flagged = true;
     }
-    add_field_hits(postings, indexed, &mut evidence);
+    add_field_hits(postings, indexed, &mut verdict.evidence);
     // Deterministic ordering: strongest evidence first, then by item id.
-    evidence.sort_unstable_by(|a, b| b.hits.cmp(&a.hits).then(a.item_id.cmp(&b.item_id)));
-    (flagged, best_hits, evidence)
+    verdict
+        .evidence
+        .sort_unstable_by(|a, b| b.hits.cmp(&a.hits).then(a.item_id.cmp(&b.item_id)));
+    verdict
 }
 
 /// Fill `field_hits` / `fields_matched` of each evidence item: the item's
@@ -384,6 +446,8 @@ enum SubDocOutcome {
 /// Scores sub-documents. The buffers are reused across sub-documents (cleared
 /// on each use) to avoid per-doc allocation in the hot scan loop;
 /// `matched_hash_to_mask` accumulates over the whole shard for `hits.bin`.
+/// After `score`, `per_item_hits` holds the sub-document's per-item hits when
+/// they were counted (always when the shard tracks per-item best coverage).
 #[derive(Default)]
 struct Scorer {
     matched_hash_to_mask: HashMap<u64, u64>,
@@ -397,6 +461,7 @@ struct Scorer {
 
 impl Scorer {
     fn score(&mut self, cfg: &PreparedScan, re: &'static Regex, sub_text: &str) -> SubDocOutcome {
+        self.per_item_hits.clear();
         if sub_text.is_empty() || (sub_text.len() < cfg.n * 2) {
             return SubDocOutcome::Skipped;
         }
@@ -458,24 +523,47 @@ impl Scorer {
         }
 
         // Decide flag + per-item evidence according to the gate mode.
-        let (mut flagged, match_count, item_hits) = match cfg.gate_mode {
-            GateMode::Union => {
-                let coverage = (distinct_hits as f64) / denom_all;
-                let flag = distinct_hits >= cfg.min_hits && coverage >= cfg.min_coverage;
-                // Gate on the union (max recall); when item postings are
-                // available, attach per-item attribution for flagged docs.
-                let evidence = match cfg.item_postings.as_ref() {
-                    Some(postings) if flag => self.item_gate(cfg, postings, denom_all).2,
-                    _ => Vec::new(),
-                };
-                (flag, distinct_hits, evidence)
-            }
-            GateMode::Item => {
-                let postings = cfg
-                    .item_postings
-                    .as_ref()
-                    .expect("item gate mode requires an item postings index");
-                self.item_gate(cfg, postings, denom_all)
+        let union_flag = distinct_hits >= cfg.item_gate.min_hits
+            && (distinct_hits as f64) / denom_all >= cfg.item_gate.min_coverage;
+        let (mut flagged, match_count, item_hits) = match cfg.item_postings.as_ref() {
+            None => (union_flag, distinct_hits, Vec::new()),
+            Some(postings) => {
+                // Per-item tests are needed for the item gate, for evidence on a
+                // union flag, and when the coverage path could fire (no item
+                // can reach min_hits unless the union does).
+                let item_mode = cfg.item_gate.mode == GateMode::Item;
+                let coverage_possible = cfg.item_gate.min_item_coverage > 0.0
+                    && distinct_hits >= cfg.item_gate.min_hits;
+                let need_verdict = item_mode || union_flag || coverage_possible;
+                if need_verdict || cfg.track_item_best {
+                    count_item_hits(
+                        postings,
+                        &self.indexed,
+                        cfg.item_gate.boilerplate_threshold,
+                        &mut self.per_item_hits,
+                    );
+                }
+                if !need_verdict {
+                    (false, distinct_hits, Vec::new())
+                } else {
+                    let verdict = item_verdict(
+                        &cfg.item_gate,
+                        postings,
+                        &self.indexed,
+                        &self.positions,
+                        denom_all,
+                        &self.per_item_hits,
+                        &mut self.item_run_state,
+                    );
+                    if item_mode {
+                        (verdict.item_gate, verdict.best_hits, verdict.evidence)
+                    } else {
+                        // Union: the index-wide rule OR one item's coverage path.
+                        let flag = union_flag || verdict.coverage_path;
+                        let evidence = if flag { verdict.evidence } else { Vec::new() };
+                        (flag, distinct_hits, evidence)
+                    }
+                }
             }
         };
 
@@ -504,28 +592,27 @@ impl Scorer {
             spaced_item,
         })
     }
-
-    fn item_gate(
-        &mut self,
-        cfg: &PreparedScan,
-        postings: &ItemPostings,
-        denom_all: f64,
-    ) -> (bool, usize, Vec<ItemHit>) {
-        item_gate(
-            postings,
-            &self.indexed,
-            &self.positions,
-            denom_all,
-            cfg.n,
-            cfg.min_hits,
-            cfg.min_coverage,
-            cfg.min_longest_run,
-            cfg.boilerplate_threshold,
-            &mut self.per_item_hits,
-            &mut self.item_run_state,
-        )
-    }
 }
+
+/// The best single-document hold on one item within a shard.
+#[derive(Serialize)]
+struct ItemBest {
+    item_id: u32,
+    hits: usize,
+    item_ngrams: usize,
+    coverage: f64,
+    doc_id: String,
+}
+
+/// `per_item_best/<shard>.json`: for every item with a hit in the shard, the
+/// sub-document holding the largest share of its n-grams.
+#[derive(Serialize)]
+struct ItemBestFile {
+    schema_version: u32,
+    items: Vec<ItemBest>,
+}
+
+const ITEM_BEST_SCHEMA_VERSION: u32 = 1;
 
 /// Doc id of one sub-document.
 ///
@@ -573,6 +660,9 @@ struct ShardScan<'c> {
     contaminated: usize,
     empty_after_filter: usize,
     results: Vec<String>,
+    /// Per item: the most hits one sub-document had, and that sub-document's id
+    /// (only when `cfg.track_item_best`).
+    item_best: HashMap<u32, (usize, String)>,
 }
 
 impl ShardScan<'_> {
@@ -588,7 +678,11 @@ impl ShardScan<'_> {
             _ => Cow::Borrowed(seg.text),
         };
         for (part, sub_text) in split_packed(&packed, cfg.packed_doc_sep.as_deref()).enumerate() {
-            let flag = match self.scorer.score(cfg, self.re, sub_text) {
+            let outcome = self.scorer.score(cfg, self.re, sub_text);
+            if cfg.track_item_best {
+                self.update_item_best(id, seg, part, sub_text);
+            }
+            let flag = match outcome {
                 SubDocOutcome::Skipped => continue,
                 SubDocOutcome::EmptyAfterFilter => {
                     self.scanned += 1;
@@ -632,6 +726,72 @@ impl ShardScan<'_> {
                 .push(serde_json::to_string(&rec).map_err(|e| e.to_string())?);
         }
         Ok(())
+    }
+
+    /// Record the sub-document just scored as the best hold on each item it has
+    /// more hits on than any earlier sub-document of the shard. An item's n-gram
+    /// count is fixed, so the most hits is the best coverage; ties keep the
+    /// first sub-document.
+    fn update_item_best(
+        &mut self,
+        id: Option<&str>,
+        seg: &Segment<'_>,
+        part: usize,
+        sub_text: &str,
+    ) {
+        let mut doc_id: Option<String> = None;
+        for (&item, &(u, s, b)) in self.scorer.per_item_hits.iter() {
+            let hits = u + s + b;
+            if self.item_best.get(&item).is_some_and(|best| best.0 >= hits) {
+                continue;
+            }
+            let doc_id = doc_id
+                .get_or_insert_with(|| {
+                    sub_doc_id(
+                        id,
+                        self.name_fields,
+                        seg,
+                        part,
+                        self.cfg.packed_doc_sep.is_some(),
+                        sub_text,
+                    )
+                })
+                .clone();
+            self.item_best.insert(item, (hits, doc_id));
+        }
+    }
+
+    fn write_item_best(&mut self, path: &str, postings: &ItemPostings) -> Result<(), String> {
+        let mut items: Vec<ItemBest> = std::mem::take(&mut self.item_best)
+            .into_iter()
+            .map(|(item_id, (hits, doc_id))| {
+                let item_ngrams = postings.ngrams_of(item_id);
+                ItemBest {
+                    item_id,
+                    hits,
+                    item_ngrams,
+                    coverage: if item_ngrams > 0 {
+                        hits as f64 / item_ngrams as f64
+                    } else {
+                        0.0
+                    },
+                    doc_id,
+                }
+            })
+            .collect();
+        items.sort_unstable_by_key(|best| best.item_id);
+        let file = File::create(path)
+            .map_err(|e| format!("Failed to create per-item best file '{}': {}", path, e))?;
+        let mut w = BufWriter::new(file);
+        serde_json::to_writer(
+            &mut w,
+            &ItemBestFile {
+                schema_version: ITEM_BEST_SCHEMA_VERSION,
+                items,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        w.flush().map_err(|e| e.to_string())
     }
 }
 
@@ -814,6 +974,7 @@ where
         contaminated: 0,
         empty_after_filter: 0,
         results: Vec::new(),
+        item_best: HashMap::new(),
     };
 
     for batch_result in arrow_reader.by_ref() {
@@ -887,6 +1048,13 @@ where
         w.flush().map_err(|e| e.to_string())?;
     }
 
+    if let (Some(path), Some(postings)) = (
+        cfg.out_item_best_path.as_deref(),
+        cfg.item_postings.as_ref(),
+    ) {
+        shard.write_item_best(path, postings)?;
+    }
+
     if log_empty_filtered && shard.empty_after_filter > 0 {
         eprintln!(
             "[scan] {} docs had all shingles filtered (stop-grams)",
@@ -923,6 +1091,8 @@ fn prepare_scan(
     spaced_min_loci: usize,
     spaced_ver_min_span: usize,
     spaced_ver_identity: f64,
+    min_item_coverage: f64,
+    out_item_best_path: Option<&str>,
 ) -> PyResult<PreparedScan> {
     if min_hits == 0 {
         return Err(PyValueError::new_err("min_hits must be >= 1"));
@@ -950,6 +1120,9 @@ fn prepare_scan(
     }
     if !(0.0..=1.0).contains(&min_coverage) {
         return Err(PyValueError::new_err("min_coverage must be in [0,1]"));
+    }
+    if !(0.0..=1.0).contains(&min_item_coverage) {
+        return Err(PyValueError::new_err("min_item_coverage must be in [0,1]"));
     }
     if packed_doc_sep == Some("") {
         return Err(PyValueError::new_err(
@@ -1021,6 +1194,11 @@ fn prepare_scan(
             "gate_mode='item' requires an item sidecar '{}.items'; rebuild the index with item postings or use gate_mode='union'.",
             index_path
         )));
+    } else if min_item_coverage > 0.0 {
+        return Err(PyValueError::new_err(format!(
+            "min_item_coverage requires an item sidecar '{}.items'; rebuild the index with item postings.",
+            index_path
+        )));
     } else {
         None
     };
@@ -1057,13 +1235,19 @@ fn prepare_scan(
         },
         backend,
         out_hits_path: out_hits_path.map(|s| s.to_string()),
+        track_item_best: out_item_best_path.is_some() && item_postings.is_some(),
+        out_item_best_path: out_item_best_path.map(str::to_string),
         n,
-        min_hits,
-        min_coverage,
         stopgrams,
-        gate_mode,
-        min_longest_run,
-        boilerplate_threshold,
+        item_gate: ItemGate {
+            mode: gate_mode,
+            n,
+            min_hits,
+            min_coverage,
+            min_item_coverage,
+            min_longest_run,
+            boilerplate_threshold,
+        },
         item_postings,
         spaced,
     })
@@ -1095,7 +1279,7 @@ fn pyfile_to_tempfile(obj: &Bound<'_, PyAny>) -> PyResult<File> {
 
 #[allow(clippy::too_many_arguments)]
 #[pyfunction]
-#[pyo3(signature = (input, text_key, id_key, index_path, n, min_hits, min_coverage, index_backend="auto", out_hits_path=None, packed_doc_sep=Some("<|endoftext|>"), packed_doc_sep_typo=Some("<|endoftext}>"), max_return_records=Some(500), stopgrams_path=None, gate_mode="auto", min_longest_run=0, spaced_path=None, spaced_min_loci=3, spaced_ver_min_span=17, spaced_ver_identity=0.85, boilerplate_threshold=50, messages_key=None))]
+#[pyo3(signature = (input, text_key, id_key, index_path, n, min_hits, min_coverage, index_backend="auto", out_hits_path=None, packed_doc_sep=Some("<|endoftext|>"), packed_doc_sep_typo=Some("<|endoftext}>"), max_return_records=Some(500), stopgrams_path=None, gate_mode="auto", min_longest_run=0, spaced_path=None, spaced_min_loci=3, spaced_ver_min_span=17, spaced_ver_identity=0.85, boilerplate_threshold=50, messages_key=None, min_item_coverage=0.0, out_item_best_path=None))]
 pub fn scan_stream_rust(
     py: Python<'_>,
     input: Bound<'_, PyAny>,
@@ -1119,6 +1303,8 @@ pub fn scan_stream_rust(
     spaced_ver_identity: f64,
     boilerplate_threshold: usize,
     messages_key: Option<&str>,
+    min_item_coverage: f64,
+    out_item_best_path: Option<&str>,
 ) -> PyResult<(usize, usize, Vec<String>, usize)> {
     // `text_key` is one column name or a list of them.
     let text_keys: Vec<String> = if text_key.is_instance_of::<PyString>() {
@@ -1146,6 +1332,8 @@ pub fn scan_stream_rust(
         spaced_min_loci,
         spaced_ver_min_span,
         spaced_ver_identity,
+        min_item_coverage,
+        out_item_best_path,
     )?;
 
     // `None` and `Some(0)` both mean "no cap": 0 used to return no records at all,

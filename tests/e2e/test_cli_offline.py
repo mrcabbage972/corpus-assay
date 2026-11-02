@@ -191,6 +191,13 @@ def test_validate_build_scan_report(
         "single_field": 0,
     }
     assert "| 1 | 1 | 0 | 0 |" in (out / "report" / "report.md").read_text("utf-8")
+    # One document holds all of item 0; item 1 only through its question.
+    by_item = {r["item_idx"]: r for r in report["leak_by_item"]}
+    assert by_item[0]["best_doc_coverage"] == 1.0
+    assert by_item[0]["best_doc_id"] == "p9-part-0"
+    assert 0 < by_item[1]["best_doc_coverage"] < 1
+    assert by_item[1]["best_doc_coverage"] == pytest.approx(by_item[1]["leak_fraction"])
+    assert by_item[1]["best_doc_shard"] == "b"
 
 
 def test_run_caches_index_per_ngram_config(
@@ -497,3 +504,41 @@ def test_scan_preference_and_chat_fields(
         ]
         _cli("inspect-run", "--scan-dir", str(chat_out), env=env)
         _cli("report", "--scan-dir", str(chat_out), env=env)
+
+
+def test_min_item_coverage_flags_a_long_document_holding_an_item(
+    tmp_path: Path, config: Path, index: Path, env: dict[str, str]
+) -> None:
+    # A strict document-coverage threshold, which a long document holding a whole
+    # item does not reach.
+    cfg = yaml.safe_load(config.read_text(encoding="utf-8"))
+    cfg["min_coverage"] = 0.05
+    strict = tmp_path / "strict.yaml"
+    strict.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    item = f"{ITEMS[0]['question']} {ITEMS[0]['answer']}"
+    long_doc = " ".join(f"word{i}" for i in range(1500)) + f" {item}"
+    shards = tmp_path / "long"
+    shards.mkdir()
+    pq.write_table(pa.table({"text": [long_doc], "id": ["long"]}), shards / "l.parquet")
+    base = [
+        "scan", "--input", str(shards), "--index", str(index), "--config", str(strict),
+        "--id-key", "id", "--workers", "1",
+    ]  # fmt: skip
+
+    _cli(*base, "--out-dir", str(tmp_path / "plain"), env=env)
+    assert _summary(tmp_path / "plain")["total_contaminated"] == 0
+
+    out = tmp_path / "item_cov"
+    _cli(*base, "--out-dir", str(out), "--min-item-coverage", "0.5", env=env)
+    assert _summary(out)["total_contaminated"] == 1
+    (record,) = _records(out)
+    hit = record["item_hits"][0]
+    assert (hit["item_id"], hit["item_coverage"]) == (0, 1.0)
+    manifest = json.loads((out / "_RUN_MANIFEST.json").read_text("utf-8"))
+    assert manifest["scan_config"]["min_item_coverage"] == 0.5
+
+    _cli("inspect-run", "--scan-dir", str(out), env=env)
+    _cli("report", "--scan-dir", str(out), env=env)
+    md = (out / "report" / "report.md").read_text("utf-8")
+    assert "- Min item coverage: `0.5`" in md

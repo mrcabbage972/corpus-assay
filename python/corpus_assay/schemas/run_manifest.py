@@ -29,6 +29,8 @@ class RunScanConfig(BaseModel):
     n: int
     min_hits: int
     min_coverage: float
+    # Per-item coverage threshold (0: off; absent in older manifests).
+    min_item_coverage: float = 0.0
     # None: packed-document splitting was off (--no-split).
     packed_doc_sep: str | None
     packed_doc_sep_typo: str | None

@@ -84,6 +84,13 @@ _MIN_LONGEST_RUN_HELP = (
     "With --gate-mode item, also require a contiguous run of >= this many normalized "
     "tokens shared with the matching item (0 disables)."
 )
+_MIN_ITEM_COVERAGE_HELP = (
+    "Share of one item's n-grams a document must hold (item coverage = hits / the "
+    "item's n-grams, with at least min_hits hits). With --gate-mode union it also "
+    "flags such a document whatever its document coverage, so a long document "
+    "holding a whole item is caught; with --gate-mode item it is an extra "
+    "requirement on the flagging item. 0 turns it off. Needs the .items sidecar."
+)
 _ALLOW_EMPTY_BENCHMARKS_HELP = (
     "Build the index even if a benchmark loads no rows or indexes no n-grams "
     "(by default the build fails and writes nothing)."
@@ -417,6 +424,13 @@ class ScanOptions(NamedTuple):
     gate_mode: str = typer.Option("union", help=_GATE_MODE_HELP)
     min_longest_run: int = typer.Option(0, help=_MIN_LONGEST_RUN_HELP)
     boilerplate_threshold: int = typer.Option(50, help=_BOILERPLATE_THRESHOLD_HELP)
+    min_item_coverage: float | None = typer.Option(
+        None,
+        min=0.0,
+        max=1.0,
+        help=_MIN_ITEM_COVERAGE_HELP,
+        show_default="the config's min_item_coverage, 0 = off",
+    )
     max_return_records: int = typer.Option(
         500,
         min=0,
@@ -544,6 +558,11 @@ def _scan_config_from_options(
         gate_mode=opts.gate_mode,
         min_longest_run=opts.min_longest_run,
         boilerplate_threshold=opts.boilerplate_threshold,
+        min_item_coverage=(
+            cfg.min_item_coverage
+            if opts.min_item_coverage is None
+            else opts.min_item_coverage
+        ),
         **extra,
     )
     _validate_stopgrams_compatibility(

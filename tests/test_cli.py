@@ -50,6 +50,7 @@ def fake_decon_cfg() -> Any:
         ngram=13,
         min_hits=3,
         min_coverage=0.001,
+        min_item_coverage=0.0,
         background=None,
         stopgrams=None,
         spaced=None,
@@ -222,6 +223,36 @@ def test_scan_with_config_uses_config_values(
     assert scan_cfg.ngram == 13
     assert scan_cfg.min_hits == 3
     assert scan_cfg.min_coverage == 0.001
+    assert scan_cfg.min_item_coverage == 0.0
+
+
+@pytest.mark.parametrize(
+    ("config_value", "flag", "expected"),
+    [(0.0, None, 0.0), (0.6, None, 0.6), (0.6, "0.5", 0.5), (0.0, "0", 0.0)],
+)
+def test_min_item_coverage_from_config_or_flag(
+    tmp_path: Path,
+    tmp_cfg_file: Path,
+    fake_decon_cfg: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    patch_scan_pipeline: dict[str, Any],
+    config_value: float,
+    flag: str | None,
+    expected: float,
+) -> None:
+    fake_decon_cfg.min_item_coverage = config_value
+    monkeypatch.setattr(cli, "load_decontamination_config", lambda _: fake_decon_cfg)
+    idx = tmp_path / "idx.native"
+    idx.write_text("x", encoding="utf-8")
+    args = [
+        "scan", "--input", str(tmp_path / "*.parquet"), "--index", str(idx),
+        "--out-dir", str(tmp_path / "out"), "--config", str(tmp_cfg_file),
+    ]  # fmt: skip
+    if flag is not None:
+        args += ["--min-item-coverage", flag]
+    result = runner.invoke(cli.app, args)
+    assert result.exit_code == 0, result.output
+    assert patch_scan_pipeline["do_scan"][0].min_item_coverage == expected
 
 
 def test_scan_dry_run_plans_only(

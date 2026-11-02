@@ -117,6 +117,9 @@ def test_union_mode_flags_cross_item_doc(item_index: str) -> None:
             "unique_hits": 2,
             "shared_hits": 0,
             "boilerplate_hits": 0,
+            # The doc holds both of the item's n-grams.
+            "item_ngrams": 2,
+            "item_coverage": 1.0,
             # Both n-grams are in the item's only field.
             "field_hits": [[0, 2]],
         }
@@ -149,6 +152,9 @@ def test_item_mode_rejects_cross_item_doc(item_index: str) -> None:
             "unique_hits": 2,
             "shared_hits": 0,
             "boilerplate_hits": 0,
+            # The doc holds both of the item's n-grams.
+            "item_ngrams": 2,
+            "item_coverage": 1.0,
             # Both n-grams are in the item's only field.
             "field_hits": [[0, 2]],
         }

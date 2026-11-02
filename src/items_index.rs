@@ -29,6 +29,9 @@ pub struct Posting {
 #[derive(Debug)]
 pub struct ItemPostings {
     pub hash_to_items: HashMap<u64, Vec<Posting>>,
+    /// Indexed n-grams per item (its number of postings), by item id. Equals the
+    /// item's `n_protected_hashes` in `.items.meta.json`.
+    pub item_ngrams: Vec<u32>,
     /// Whether the postings carry field masks (format v2).
     pub has_fields: bool,
     /// Field names for the field-mask bits, from `.items.meta.json` (empty when
@@ -45,6 +48,12 @@ struct FieldNames {
 }
 
 impl ItemPostings {
+    /// Indexed n-grams of `item` (0 for an id the sidecar does not know).
+    #[inline]
+    pub fn ngrams_of(&self, item: u32) -> usize {
+        self.item_ngrams.get(item as usize).copied().unwrap_or(0) as usize
+    }
+
     /// Name of field `field` of `item`'s benchmark, when the meta lists it.
     pub fn field_name(&self, item: u32, field: u32) -> Option<&str> {
         let bench = *self.field_names.item_benchmark.get(item as usize)?;
@@ -110,6 +119,9 @@ fn load_field_names(index_path: &str) -> FieldNames {
     }
 }
 
+/// Upper bound on item ids accepted from a sidecar (dense per-item tables).
+const MAX_ITEMS: usize = 1 << 28;
+
 #[allow(clippy::type_complexity)]
 static ITEMS_INDEX: Lazy<Mutex<std::collections::HashMap<String, Arc<ItemPostings>>>> =
     Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
@@ -161,6 +173,7 @@ fn load_items_from_sidecar(index_path: &str) -> PyResult<ItemPostings> {
     // still grows as records are read.
     let mut hash_to_items: HashMap<u64, Vec<Posting>> =
         HashMap::with_capacity((header.record_count as usize).min(1_000_000));
+    let mut item_ngrams: Vec<u32> = Vec::new();
     for _ in 0..header.record_count {
         let hash = reader
             .read_u64::<LittleEndian>()
@@ -175,6 +188,19 @@ fn load_items_from_sidecar(index_path: &str) -> PyResult<ItemPostings> {
             } else {
                 0
             };
+            let idx = item as usize;
+            // Item ids index a dense table; a corrupt id must not trigger a huge
+            // allocation.
+            if idx >= MAX_ITEMS {
+                return Err(PyValueError::new_err(format!(
+                    "Item id {} in item sidecar '{}' exceeds the supported maximum",
+                    item, path
+                )));
+            }
+            if idx >= item_ngrams.len() {
+                item_ngrams.resize(idx + 1, 0);
+            }
+            item_ngrams[idx] += 1;
             postings.push(Posting { item, fields });
         }
         hash_to_items.insert(hash, postings);
@@ -196,6 +222,7 @@ fn load_items_from_sidecar(index_path: &str) -> PyResult<ItemPostings> {
     };
     Ok(ItemPostings {
         hash_to_items,
+        item_ngrams,
         has_fields,
         field_names,
     })

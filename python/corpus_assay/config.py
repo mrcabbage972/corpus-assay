@@ -28,6 +28,9 @@ class DecontaminationConfig(BaseModel):
     ngram: int = Field(default=13, gt=0)
     min_hits: int = Field(default=3, gt=0)
     min_coverage: float = Field(default=0.001, ge=0.0, le=1.0)
+    # Share of one item's n-grams a document must hold (with >= min_hits hits) to
+    # be flagged whatever its document coverage; 0 turns it off. See ScanConfig.
+    min_item_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
     background: "BackgroundConfig | None" = None
     stopgrams: "StopGramsConfig | None" = None
     spaced: "SpacedSeedsConfig | None" = None
@@ -119,6 +122,12 @@ class ScanConfig(BaseModel):
     # per-item attribution split (unique / shared / boilerplate) emitted for
     # flagged docs.
     boilerplate_threshold: int = Field(default=50, ge=2)
+    # Per-item coverage threshold: the share of one protected item's indexed
+    # n-grams a document holds (item_coverage = hits / item n-grams). 0 disables.
+    # In union mode an item with >= min_hits hits at this coverage flags the
+    # document whatever its document coverage (an OR path to the union rule); in
+    # item mode it is an extra requirement on the flagging item. Needs `.items`.
+    min_item_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
 
     @field_validator("index_backend")
     @classmethod
