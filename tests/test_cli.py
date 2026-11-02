@@ -697,3 +697,15 @@ def test_inspect_index_tolerates_v1_meta_and_reads_sidecars(tmp_path: Path) -> N
     old = next(line.split() for line in result.output.splitlines() if "Old" in line)
     assert old == ["Old", "?", "3", "?", "?"]
     assert "unflaggable items: unknown" in result.output
+
+
+def test_scanning_commands_share_scan_options() -> None:
+    """scan / run / run-hf take every shared scan option from one definition."""
+    import typer.main
+
+    group = typer.main.get_command(cli.app)
+    shared = set(cli.ScanOptions._fields)
+    for name in ("scan", "run", "run-hf"):
+        command = group.commands[name]  # type: ignore[attr-defined]
+        params = {param.name for param in command.params}
+        assert shared <= params, (name, shared - params)

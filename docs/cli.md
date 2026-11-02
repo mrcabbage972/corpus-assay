@@ -240,19 +240,19 @@ $ corpus-assay scan [OPTIONS]
 * `--out-dir <str>`: Directory for per-file outputs and summaries.  [required]
 * `--text-key <str>`: Field name containing document text (default: text).  [default: text]
 * `--id-key <str>`: Optional stable doc id field (otherwise hashed from text).
-* `--dry-run`: Plan scan only; do not execute.
 * `--workers <int>`: Parallel worker processes.  [default: (CPU count)]
 * `--index-backend <str>`: Index backend: auto, memory, or mmap.  [default: auto]
 * `--gate-mode <str>`: Contamination gate. &#x27;union&#x27; (default) flags a document when its matches across the whole index clear min_hits/min_coverage, with per-item attribution when an .items sidecar is present. &#x27;item&#x27; is stricter: a single protected item must clear them on its own (needs the .items sidecar). &#x27;auto&#x27; is an alias for &#x27;union&#x27;.  [default: union]
 * `--min-longest-run <int>`: With --gate-mode item, also require a contiguous run of &gt;= this many normalized tokens shared with the matching item (0 disables).  [default: 0]
 * `--boilerplate-threshold <int>`: Item fan-out at/above which a matched n-gram is counted as boilerplate in the per-item attribution split (unique/shared/boilerplate); must be &gt;= 2.  [default: 50]
 * `--max-return-records <int>`: Max contaminated document records to return per shard (sample only; use 0 to disable).  [default: 500]
-* `--config <str>`: YAML config with decontamination hyperparameters.  [required]
 * `--stopgrams <str>`: Path to stop-grams native file (optional).
 * `--allow-unverified-stopgrams`: Allow stop-grams without a compatible meta file.
 * `--spaced-seeds <str>`: [Experimental] Path to a .spaced index for the spaced-seed recall channel.
 * `--allow-unverified-spaced`: Allow a spaced index without a compatible meta file.
 * `--allow-config-mismatch`: Scan even if the index was built with a different ngram config.
+* `--dry-run`: Plan scan only; do not execute.
+* `--config <str>`: YAML config with decontamination hyperparameters.  [required]
 * `--help`: Show this message and exit.
 
 ## `corpus-assay run-hf`
@@ -280,6 +280,11 @@ $ corpus-assay run-hf [OPTIONS]
 * `--min-longest-run <int>`: With --gate-mode item, also require a contiguous run of &gt;= this many normalized tokens shared with the matching item (0 disables).  [default: 0]
 * `--boilerplate-threshold <int>`: Item fan-out at/above which a matched n-gram is counted as boilerplate in the per-item attribution split (unique/shared/boilerplate); must be &gt;= 2.  [default: 50]
 * `--max-return-records <int>`: Max contaminated document records to return per shard (sample only; use 0 to disable).  [default: 500]
+* `--stopgrams <str>`: Path to stop-grams native file (optional).
+* `--allow-unverified-stopgrams`: Allow stop-grams without a compatible meta file.
+* `--spaced-seeds <str>`: [Experimental] Path to a .spaced index for the spaced-seed recall channel.
+* `--allow-unverified-spaced`: Allow a spaced index without a compatible meta file.
+* `--allow-config-mismatch`: Scan even if the index was built with a different ngram config.
 * `--allow-unpinned`: Allow benchmarks without a pinned revision.
 * `--allow-empty-benchmarks`: Build the index even if a benchmark loads no rows or indexes no n-grams (by default the build fails and writes nothing).
 * `--index-cache-dir <str>`: Directory to cache built native indexes (honors XDG_CACHE_HOME).  [default: (~/.cache/corpus-assay/indexes)]
@@ -287,11 +292,6 @@ $ corpus-assay run-hf [OPTIONS]
 * `--parquet-rows-per-file <int>`: Max rows per parquet shard when materializing; use 0 to force a single file.  [default: 500000]
 * `--dry-run`: Plan run only; do not execute.
 * `--trust-remote-code`: Allow execution of dataset loading code from the Hub.
-* `--stopgrams <str>`: Path to stop-grams native file (optional).
-* `--allow-unverified-stopgrams`: Allow stop-grams without a compatible meta file.
-* `--spaced-seeds <str>`: [Experimental] Path to a .spaced index for the spaced-seed recall channel.
-* `--allow-unverified-spaced`: Allow a spaced index without a compatible meta file.
-* `--allow-config-mismatch`: Scan even if the index was built with a different ngram config.
 * `--help`: Show this message and exit.
 
 ## `corpus-assay run`
@@ -317,15 +317,15 @@ $ corpus-assay run [OPTIONS]
 * `--min-longest-run <int>`: With --gate-mode item, also require a contiguous run of &gt;= this many normalized tokens shared with the matching item (0 disables).  [default: 0]
 * `--boilerplate-threshold <int>`: Item fan-out at/above which a matched n-gram is counted as boilerplate in the per-item attribution split (unique/shared/boilerplate); must be &gt;= 2.  [default: 50]
 * `--max-return-records <int>`: Max contaminated document records to return per shard (sample only; use 0 to disable).  [default: 500]
-* `--allow-unpinned`: Allow benchmarks without a pinned revision.
-* `--allow-empty-benchmarks`: Build the index even if a benchmark loads no rows or indexes no n-grams (by default the build fails and writes nothing).
-* `--dry-run`: Plan run only; do not execute.
-* `--index-cache-dir <str>`: Directory to cache built native indexes (honors XDG_CACHE_HOME).  [default: (~/.cache/corpus-assay/indexes)]
 * `--stopgrams <str>`: Path to stop-grams native file (optional).
 * `--allow-unverified-stopgrams`: Allow stop-grams without a compatible meta file.
 * `--spaced-seeds <str>`: [Experimental] Path to a .spaced index for the spaced-seed recall channel.
 * `--allow-unverified-spaced`: Allow a spaced index without a compatible meta file.
 * `--allow-config-mismatch`: Scan even if the index was built with a different ngram config.
+* `--allow-unpinned`: Allow benchmarks without a pinned revision.
+* `--allow-empty-benchmarks`: Build the index even if a benchmark loads no rows or indexes no n-grams (by default the build fails and writes nothing).
+* `--dry-run`: Plan run only; do not execute.
+* `--index-cache-dir <str>`: Directory to cache built native indexes (honors XDG_CACHE_HOME).  [default: (~/.cache/corpus-assay/indexes)]
 * `--help`: Show this message and exit.
 
 ## `corpus-assay report`
