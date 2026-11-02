@@ -45,6 +45,12 @@ All notable changes to this project are documented here. The format follows
 - Every registry entry is pinned to a Hub commit, so configs written by `init-config`
   pass the revision-pin check without `--allow-unpinned`.
 
+### Fixed
+
+- `validate-config --check-remote` rejected datasets whose card lists no splits even
+  though their `data_files` load (for example `opencompass/AIME2025`: "splits not found
+  ... Available: []"). It now takes the split names from the `data_files` keys.
+
 ## [0.1.0] - 2026-10-03
 
 Initial public release.

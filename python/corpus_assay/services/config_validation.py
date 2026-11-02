@@ -28,6 +28,29 @@ class _DatasetBuilder(Protocol):
 DatasetBuilderLoader = Callable[..., _DatasetBuilder]
 
 
+def _splits_from_data_files(data_files: object) -> set[str]:
+    """Split names implied by a ``data_files`` value (as `datasets` reads it)."""
+    if isinstance(data_files, Mapping):
+        return {str(key) for key in data_files}
+    if isinstance(data_files, (str, list, tuple)) and data_files:
+        return {"train"}
+    return set()
+
+
+def _available_splits(spec: BenchmarkSpec, builder: _DatasetBuilder) -> set[str]:
+    info = builder.info
+    if info is not None and info.splits:
+        return set(info.splits.keys())
+    # Some datasets (e.g. opencompass/AIME2025) have no split metadata in their
+    # card even though their data_files load fine; fall back to the data_files
+    # keys, from the spec or as resolved by the builder.
+    splits = _splits_from_data_files(spec.data_files)
+    if not splits:
+        builder_config = getattr(builder, "config", None)
+        splits = _splits_from_data_files(getattr(builder_config, "data_files", None))
+    return splits
+
+
 class BenchmarkLoaderProtocol(Protocol):
     def resolve_config_names(self) -> Sequence[str | None]: ...
 
@@ -128,11 +151,7 @@ class ConfigValidator:
             for config_name in configs:
                 try:
                     builder = self._build_dataset_builder(spec, config_name)
-                    splits = (
-                        set(builder.info.splits.keys())
-                        if builder.info and builder.info.splits
-                        else set()
-                    )
+                    splits = _available_splits(spec, builder)
                 except Exception as exc:
                     warnings.append(
                         f"[warn] {spec.name}: could not validate remotely: {exc}"

@@ -43,7 +43,7 @@ Keys of a full spec:
 | `drop_configs` | `null` | Configs to remove after `*` expansion. |
 | `subtraction_splits` | `null` | Splits whose n-grams are *removed* from the index (e.g. `[train]`), so only n-grams specific to the protected split remain. |
 | `revision` | `null` | Hub commit hash or tag. `build-index` requires it unless `--allow-unpinned` is passed. Registry entries are pinned. |
-| `data_files` | `null` | Passed to `datasets.load_dataset`, e.g. `{test: /path/items.jsonl}`. |
+| `data_files` | `null` | Passed to `datasets.load_dataset`, e.g. `{test: /path/items.jsonl}`. When the dataset card lists no splits, `validate-config --check-remote` takes the split names from these keys (a string or list means `train`). |
 | `trust_remote_code` | `false` | Passed to `datasets.load_dataset`. Script-based datasets are not supported by `datasets` 4.x. |
 
 ### The built-in registry
