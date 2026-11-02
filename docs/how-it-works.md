@@ -221,5 +221,8 @@ The defaults (`ngram: 13`, `min_hits: 3`, `min_coverage: 0.001`) are conservativ
 settings for web-scale pretraining text. Raising `min_hits` or `min_coverage` trades
 recall for precision. For short documents (forum posts, Q&A pages), coverage is easy to
 reach, and `min_hits` is the binding constraint. Validate your thresholds on a sample:
-plant known benchmark items into clean text and check that they are flagged, then
-inspect a sample of flagged documents for false positives.
+`corpus-assay selftest` plants known benchmark items (verbatim, and with case,
+whitespace or wrapper-line edits) into synthetic filler or copies of your own
+records, scans them with your settings, and reports recall per gate, channel and
+variant, separating the items no enabled channel can match (too few n-grams, exact
+channel off). Then inspect a sample of flagged documents for false positives.

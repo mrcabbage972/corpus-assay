@@ -17,6 +17,7 @@ version from 3.12 up.
 | `scanner/` | Multiprocess scan driver (`runner.py`), per-shard worker (`worker.py`), output layout and I/O |
 | `reporting.py` | Leak reports from a scan directory |
 | `filtering.py` | Cleaned shards, filter manifest and dataset card snippet (`filter`) |
+| `selftest.py` | Planting, scanning and recall scoring (`selftest`) |
 | `stopgrams.py` | Stop-gram builder and compatibility checks |
 | `spaced_seeds.py`, `spaced_index.py` | Experimental spaced-seed reference implementation and `.spaced` format |
 | `normalization.py`, `constants.py` | Normalization-config staging, defaults |

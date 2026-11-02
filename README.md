@@ -214,6 +214,7 @@ benchmarks:
 | `scan` | Scan Parquet/JSONL shards against an index |
 | `run`, `run-hf` | Build or reuse a cached index, then scan local shards or an HF split |
 | `filter` | Scan, then write decontaminated copies of the shards with a manifest of the index used |
+| `selftest` | Plant benchmark items into clean text, scan it with your settings, and report recall |
 | `report` | Leak reports (JSON, CSV, Markdown) from a scan directory |
 | `inspect-run` | Validate a scan output directory |
 | `reproduce` | Re-run a scan from its `_RUN_MANIFEST.json` after checking input hashes |
@@ -266,6 +267,24 @@ input and output shard hashes and row counts, and removals per benchmark),
 `removed_ids.ndjson`, a `DATASET_CARD_SNIPPET.md` to paste into the dataset card,
 and the scan itself under `_scan/`. It refuses a non-empty `--out-dir` unless
 `--overwrite`.
+
+## Checking recall
+
+`selftest` measures what a scan with your settings would catch. It samples items
+from the index, plants them into synthetic filler (or copies of your first
+records, `--host corpus --input ...`), scans the planted file once per gate (and
+with the exact channel when `--exact-channel` is set), and prints recall per gate,
+channel and variant, the missed items, and false positives on unplanted hosts:
+
+```bash
+corpus-assay selftest --index index.native --config config.yaml --out-dir selftest/ \
+  --n-items 50 --variants verbatim,case,whitespace,wrapper --exact-channel short
+```
+
+Items no enabled channel can match (fewer than `min_hits` n-grams and not covered
+by the exact channel) are listed apart and left out of recall. It exits non-zero
+when recall on matchable verbatim plants is below `--min-recall` (default 1.0), and
+writes `planted.parquet` and `truth.jsonl` so the result can be reproduced.
 
 ## Reducing false positives
 

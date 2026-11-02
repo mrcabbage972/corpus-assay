@@ -291,6 +291,29 @@ normalization hashes.
   settings, the tool version, the index SHA-256, the removal counts, the command
   to reproduce the run and how to cite it.
 
+## Self-test (`selftest`)
+
+```
+<out_dir>/
+├── planted.parquet   # control hosts, then one row per sampled item and variant
+├── truth.jsonl       # per row: row_index, kind (control / plant), doc_id with --id-key,
+│                     #   item_idx, item_id, benchmark, variant, perturbation
+├── selftest.json
+└── scans/<run>/      # each scan of planted.parquet, as written by `scan`
+```
+
+`selftest.json` (`schema_version` 1) holds the `index` and `scan_config` (as in the
+run manifest), the sample (`n_items`, `seed`, `variants`, `host`), each sampled item
+with its indexed n-gram count, question length and whether the n-gram rule and the
+exact channel can match it, the `unmatchable` items (no enabled channel can match
+them; left out of every recall figure), and per run (`union`, `item`, and
+`<gate>+exact` with `--exact-channel`): `overall` and `by_variant` recall
+(`matchable`, `found`, `recall`), `by_channel` (the run with the exact channel:
+`ngram` and `exact`), `attributed` (found plants whose record names the planted
+item), `missed` plants, and `false_positives` among the `controls`. A plant counts
+as found when the run flags any sub-document of its row. `configured_run`,
+`gated_recall`, `min_recall` and `passed` give the verdict the exit code follows.
+
 ## Reports (`report`)
 
 `<out_dir>/report/` (or `--out-dir`) contains:

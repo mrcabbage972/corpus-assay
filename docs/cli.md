@@ -32,6 +32,7 @@ $ corpus-assay [OPTIONS] COMMAND [ARGS]...
 * `validate-config`: Validate a config file (optionally...
 * `scan`: Scan dataset shards using the fast Rust...
 * `filter`: Write decontaminated copies of the shards,...
+* `selftest`: Plant benchmark items into clean text,...
 * `run-hf`: Build (or reuse) a native index and scan a...
 * `run`: Build (or reuse) a native index and scan...
 * `report`: Generate reporting outputs from an...
@@ -307,6 +308,59 @@ $ corpus-assay filter [OPTIONS]
 * `--config <str>`: YAML config with decontamination hyperparameters.  [required]
 * `--granularity <str>`: record: drop every row with a flagged sub-document. subdoc: remove only the flagged sub-documents (packed parts are dropped and the rest rejoined, an emptied text field is set to &#x27;&#x27;, an emptied chat turn is removed); a row left with no text is dropped.  [default: record]
 * `--overwrite`: Replace the outputs of a previous filter run in a non-empty --out-dir.
+* `--help`: Show this message and exit.
+
+## `corpus-assay selftest`
+
+Plant benchmark items into clean text, scan it, and report recall.
+
+Samples items from the index&#x27;s .items.text.jsonl, plants each under each
+variant, and scans the planted file with this command&#x27;s scan settings once
+per gate (union, and item when the index has .items) and, with
+--exact-channel, once more with the exact channel. Reports recall per run,
+variant and channel, the missed items, the items no enabled channel can
+match (left out of recall), and false positives on the unplanted hosts.
+Every flagged record is kept, and one worker scans the planted file, so
+--max-return-records and --workers have no effect.
+
+**Usage**:
+
+```console
+$ corpus-assay selftest [OPTIONS]
+```
+
+**Options**:
+
+* `--index <str>`: Path to the .native index.  [required]
+* `--out-dir <str>`: Directory for planted.parquet, truth.jsonl, selftest.json and the scans of the planted file (scans/).  [required]
+* `--text-key <str>`: Column containing document text. Repeat to scan several columns (e.g. --text-key prompt --text-key chosen --text-key rejected); each is scanned as its own document. Default: text (none when --messages-key is given).
+* `--messages-key <str>`: Chat column holding a list of {role, content} messages; each turn is scanned as its own document and records carry its role and turn index.
+* `--id-key <str>`: Optional stable doc id field (otherwise hashed from text).
+* `--workers <int>`: Parallel worker processes.  [default: (CPU count)]
+* `--index-backend <str>`: Index backend: auto, memory, or mmap.  [default: auto]
+* `--no-split`: Do not split records on the packed-document separator (&lt;|endoftext|&gt; and its typo variant): each record is one document, and doc ids get no -part-&lt;k&gt; suffix. Use for chat data or decoded text that may legitimately contain the token.
+* `--gate-mode <str>`: Contamination gate. &#x27;union&#x27; (default) flags a document when its matches across the whole index clear min_hits/min_coverage, with per-item attribution when an .items sidecar is present. &#x27;item&#x27; is stricter: a single protected item must clear them on its own (needs the .items sidecar). &#x27;auto&#x27; is an alias for &#x27;union&#x27;.  [default: union]
+* `--min-longest-run <int>`: With --gate-mode item, also require a contiguous run of &gt;= this many normalized tokens shared with the matching item (0 disables).  [default: 0]
+* `--boilerplate-threshold <int>`: Item fan-out at/above which a matched n-gram is counted as boilerplate in the per-item attribution split (unique/shared/boilerplate); must be &gt;= 2.  [default: 50]
+* `--min-item-coverage <float range>`: Share of one item&#x27;s n-grams a document must hold (item coverage = hits / the item&#x27;s n-grams, with at least min_hits hits). With --gate-mode union it also flags such a document whatever its document coverage, so a long document holding a whole item is caught; with --gate-mode item it is an extra requirement on the flagging item. 0 turns it off. Needs the .items sidecar.  [default: (the config&#x27;s min_item_coverage, 0 = off); 0.0&lt;=x&lt;=1.0]
+* `--exact-channel <str>`: Exact-match channel: off, short (items with fewer than min_hits n-grams, which the n-gram rule cannot flag) or all (every item). Matches each item&#x27;s question (its first field) verbatim after light normalization (Unicode NFKC, lowercase, whitespace collapsed; numbers, operators and stop words kept), on word boundaries; a match flags the document. Needs the index&#x27;s .items.text.jsonl sidecar.  [default: (the config&#x27;s exact_channel, off)]
+* `--exact-min-chars <int range>`: Shortest question, in characters after light normalization, the exact channel matches (shorter stems are too generic).  [default: (the config&#x27;s exact_min_chars, 12); x&gt;=1]
+* `--confirm / --no-confirm`: Report, for each flagged (document, item) pair, the item&#x27;s numbers found in the document (numbers_matched / numbers_total) and the longest common substring with its question (lcs_chars, lcs_ratio), to tell copies from template variants. Report only: never changes which documents are flagged. Needs the index&#x27;s .items.text.jsonl sidecar.  [default: (the config&#x27;s confirm, off)]
+* `--max-return-records <int range>`: Max flagged sub-document records written per shard to contaminated_docs/: a sample (the first N flagged, in scan order). Use 0 (or --all-records) to write every flagged record. The per-shard counts and hits.bin are always exhaustive.  [default: 500; x&gt;=0]
+* `--all-records`: Write every flagged record to contaminated_docs/ (no cap; same as --max-return-records 0).
+* `--stopgrams <str>`: Path to stop-grams native file (optional).
+* `--allow-unverified-stopgrams`: Allow stop-grams without a compatible meta file.
+* `--spaced-seeds <str>`: [Experimental] Path to a .spaced index for the spaced-seed recall channel.
+* `--allow-unverified-spaced`: Allow a spaced index without a compatible meta file.
+* `--allow-config-mismatch`: Scan even if the index was built with a different ngram config.
+* `--config <str>`: YAML config with decontamination hyperparameters.  [required]
+* `--input, --input-glob <str>`: Input shards whose first records host the plants (--host corpus).
+* `--n-items <int range>`: Items to sample from the index.  [default: 50; x&gt;=1]
+* `--seed <int>`: Random seed (item sample and perturbations).  [default: 0]
+* `--variants <str>`: Comma list of plant variants: verbatim, case (upper/lower/title), whitespace (collapsed/expanded), wrapper (a lead-in and a trailing line).  [default: verbatim]
+* `--host <str>`: Host documents: synthetic filler text, or corpus (copies of the first records of --input, read from the scan&#x27;s text or messages column).  [default: synthetic]
+* `--min-recall <float range>`: Exit non-zero when the recall of the configured gate (and exact channel) on matchable verbatim plants is below this.  [default: 1.0; 0.0&lt;=x&lt;=1.0]
+* `--overwrite`: Replace a previous selftest in a non-empty --out-dir.
 * `--help`: Show this message and exit.
 
 ## `corpus-assay run-hf`

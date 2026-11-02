@@ -154,6 +154,18 @@ All notable changes to this project are documented here. The format follows
   It refuses a non-empty `--out-dir` (unless `--overwrite`), an `--out-dir` inside an
   input directory, shards whose scan outputs would collide (same file stem), and
   writes nothing when a shard fails to scan.
+- `selftest` (#12): samples `--n-items` (50) items from the index's
+  `.items.text.jsonl` (`--seed`), plants each (fields one per line, list fields one
+  element per line) under each of `--variants` (`verbatim`, `case`, `whitespace`,
+  `wrapper`) into `--host synthetic` filler or `--host corpus` copies of the first
+  records of `--input`, writes `planted.parquet` and `truth.jsonl`, and scans the
+  planted file with the scan options given, once per gate (`union`, and `item` with
+  an `.items` sidecar) and once with the exact channel when `--exact-channel` is
+  set. It prints recall per run, variant and channel, the missed items, false
+  positives on the unplanted hosts, and, apart, the items no enabled channel can
+  match (fewer than `min_hits` n-grams and not covered by the exact channel), which
+  are left out of recall; writes `selftest.json`; and exits 1 when the configured
+  gate's recall on matchable verbatim plants is below `--min-recall` (1.0).
 
 ### Changed
 
