@@ -64,6 +64,9 @@ All notable changes to this project are documented here. The format follows
   return no records at all. `ScanConfig(max_return_records=0)` and the Rust scanner
   treat 0 as no cap too, and the docs now say that the default output is a sample of
   the first N flagged sub-documents per shard (`hits.bin` is always exhaustive).
+- A script that calls `do_scan` without an `if __name__ == "__main__":` guard now
+  fails with a `RuntimeError` that names the guard. The spawned workers used to re-run
+  the script and the scan at import, die, and be respawned forever, so the run hung.
 - No empty `contaminated_docs/<shard>.decontam.sample.ndjson` is written for a shard
   with no records, and a stale one from an earlier run of the shard is removed.
 

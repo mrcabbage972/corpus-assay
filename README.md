@@ -245,6 +245,11 @@ File formats are documented in
 
 ## Python API
 
+`do_scan` runs its workers with the `spawn` start method, which re-imports your main
+script in every worker. **Call it under an `if __name__ == "__main__":` guard.** Without
+the guard each worker would re-run the script's setup and the scan; `do_scan` detects
+this and raises a `RuntimeError` instead of hanging.
+
 ```python
 from pathlib import Path
 
