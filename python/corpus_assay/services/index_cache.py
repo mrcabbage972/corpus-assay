@@ -88,8 +88,8 @@ def index_cache_path(
 ) -> Path:
     """Cache path for the index a config builds.
 
-    Keyed on the config file, the resolved benchmark specs, the normalization config
-    and the library version. The specs are hashed after registry refs are resolved,
+    Keyed on the config file (which holds ``stopgrams.items``), the resolved
+    benchmark specs, the normalization config and the library version. The specs are hashed after registry refs are resolved,
     so a registry change (same config text, different specs) builds a new index
     instead of reusing a stale one. ``benchmarks`` defaults to loading the config.
     """
@@ -137,6 +137,7 @@ def ensure_native_index(
             allow_unpinned=allow_unpinned,
             allow_empty_benchmarks=allow_empty_benchmarks,
             min_hits=cfg.min_hits,
+            item_stopgrams=cfg.stopgrams.items if cfg.stopgrams else None,
         )
     )
     logger.info("Wrote native index to: %s", native_path)

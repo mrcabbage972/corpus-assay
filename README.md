@@ -255,6 +255,10 @@ File formats are documented in
   corpus-assay scan ... --stopgrams stopgrams.native
   ```
 
+- **Item stop-grams.** When the protected items repeat an instruction ("Write Python
+  code to solve the problem..."), `stopgrams.items: {max_item_share: 0.01}` in the
+  config (or `build-index --item-stopgrams-share 0.01`) drops the n-grams held by more
+  than 1% of the items from the index.
 - **Item gate.** `--gate-mode item` flags a document only if a *single* benchmark item
   clears the thresholds on its own, rather than the union of all matches.
 

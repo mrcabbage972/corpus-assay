@@ -86,6 +86,28 @@ class AttributionIndex:
         else:
             bucket[item_idx] |= bit
 
+    def drop_item_stopgrams(
+        self, *, max_item_share: float, min_count: int
+    ) -> list[int]:
+        """Drop hashes held by many items; return them, sorted.
+
+        A hash is dropped when more than ``max_item_share`` of all registered
+        items, and at least ``min_count`` items, hold it. It leaves both the
+        attribution map and the item postings, and each holding item's
+        ``n_protected_hashes`` goes down by one.
+        """
+        limit = max_item_share * len(self.items_meta)
+        dropped = sorted(
+            h
+            for h, items in self.hash2items.items()
+            if len(items) > limit and len(items) >= min_count
+        )
+        for h in dropped:
+            for item in self.hash2items.pop(h):
+                self.items_meta[item]["n_protected_hashes"] -= 1
+            self.hash2mask.pop(h, None)
+        return dropped
+
     def get_source_id(self, name: str) -> int:
         """Return the numeric source id for a name, registering if needed."""
         if name not in self.name_to_id:

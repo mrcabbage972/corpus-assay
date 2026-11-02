@@ -51,6 +51,8 @@ $ corpus-assay build-index [OPTIONS]
 * `--config <str>`: YAML config with decontamination hyperparameters.  [required]
 * `--allow-unpinned`: Allow benchmarks without a pinned revision.
 * `--allow-empty-benchmarks`: Build the index even if a benchmark loads no rows or indexes no n-grams (by default the build fails and writes nothing).
+* `--item-stopgrams-share <float range>`: Drop n-grams held by more than this share of all indexed items (e.g. 0.01), such as an instruction line repeated across the items, so a wrapped copy of an item still matches in full. Overrides stopgrams.items.max_item_share and turns item stop-grams on.  [default: (config, else off); 0.0&lt;=x&lt;=1.0]
+* `--item-stopgrams-min-count <int range>`: Only drop n-grams held by at least this many items. Overrides stopgrams.items.min_count and turns item stop-grams on.  [default: (config, else 10); x&gt;=2]
 * `--dry-run`: Plan index build only; do not execute.
 * `--help`: Show this message and exit.
 

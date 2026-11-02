@@ -215,6 +215,8 @@ class BuildIndexConfig(BaseModel):
     allow_empty_benchmarks: bool = False
     # Only used to count the items with fewer than min_hits n-grams.
     min_hits: int = Field(default=3, gt=0)
+    # Drop n-grams held by many of the indexed items (None: off).
+    item_stopgrams: ItemStopGramsConfig | None = None
 
     @field_validator("benchmarks")
     @classmethod
@@ -270,11 +272,29 @@ class BackgroundConfig(BaseModel):
     corpus: BackgroundCorpusConfig | None = None
 
 
+class ItemStopGramsConfig(BaseModel):
+    """Stop-grams learned from the indexed items themselves (``stopgrams.items``).
+
+    At index time, an n-gram held by more than ``max_item_share`` of all indexed
+    items, and by at least ``min_count`` items, is dropped from the index (and
+    written to ``<index>.item_stopgrams``). This removes text repeated across
+    items, such as a shared instruction line, before matching.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_item_share: float = Field(default=0.01, gt=0.0, le=1.0)
+    min_count: int = Field(default=10, ge=2)
+
+
 class StopGramsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
     path: str | None = None
+    # Index-time stop-grams learned from the items (off when absent). Independent
+    # of `enabled`/`path`, which apply background stop-grams at scan time.
+    items: ItemStopGramsConfig | None = None
 
     @model_validator(mode="after")
     def _validate_settings(self) -> "StopGramsConfig":

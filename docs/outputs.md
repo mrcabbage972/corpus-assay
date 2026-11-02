@@ -10,6 +10,7 @@ All binary files are little-endian. Every JSON sidecar carries a `schema_version
 | `<index>.native.attr` | Header (type 2) + `<u64 hash, u64 benchmark_mask>` records, sorted by hash |
 | `<index>.native.items` | Item postings, format v2: header (type 5) + per hash, sorted: `<u64 hash, u32 n, n × (u32 item_idx, u32 field_mask)>` |
 | `<index>.native.items.meta.json` | Item table: `(benchmark, item_id, n_protected_hashes)` per item index, plus `fields`: each benchmark's field names, in spec order |
+| `<index>.native.item_stopgrams` | With `stopgrams.items`: the n-grams dropped as item stop-grams, in the stop-grams format (`CASTOP1` header, sorted `u64` hashes) |
 | `<index>.native.sources.json` | Benchmark legend: `id_to_name`, `name_to_id`, per-benchmark hash totals |
 | `<index>.native.meta.json` | Provenance: tool versions, `ngram`, normalization config hash/SHA, hash function, benchmark specs, HF dataset fingerprints and resolved revisions, and per-benchmark counts (`benchmark_stats`) |
 
@@ -18,7 +19,10 @@ benchmark: `name`, `items`, `ngrams` (distinct hashes attributed to it),
 `items_zero_ngrams`, `items_below_min_hits` (items with fewer than `min_hits` n-grams,
 those with none included) and the `min_hits` used. Version 1 files have no
 `benchmark_stats` and still load; `inspect-index` then derives what it can from
-`.sources.json` and `.items.meta.json`.
+`.sources.json` and `.items.meta.json`. An index built with `stopgrams.items` also
+records `item_stopgrams`: `max_item_share`, `min_count`, `n_items` (the items the
+share was taken of), `dropped` (the number of n-grams removed) and `file`; the
+`benchmark_stats` are counted after the drop.
 
 Bit `i` of a benchmark mask is set when the n-gram occurs in benchmark `id_to_name[i]`.
 
@@ -99,8 +103,8 @@ normalization hashes.
   re-checks the recorded hashes, and re-runs the scan.
 - **`summaries/<shard>.summary.json`** holds per-shard counts, an `error` field when the
   shard failed, and a run fingerprint. A re-run with the same fingerprint skips the
-  shard. The fingerprint covers the index (including `.items` and
-  `.items.meta.json`), config, and normalization config.
+  shard. The fingerprint covers the index (including `.items`, `.items.meta.json`
+  and `.item_stopgrams`), config, and normalization config.
 - **`per_source_hits/<shard>.hits.bin`** has a header of type 3, then
   `<u64 hash, u64 mask>` for **every** distinct matched hash in the shard. `report`
   aggregates these files.

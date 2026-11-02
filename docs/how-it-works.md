@@ -56,6 +56,11 @@ from the Hub, a gated dataset without a login, a wrong split or path) or contrib
 n-grams, `build-index` stops before writing anything and names the benchmark and the
 reason. `--allow-empty-benchmarks` (also on `run` and `run-hf`) builds the index anyway.
 
+**Item stop-grams.** With `stopgrams.items` (off by default), n-grams held by more
+than a share of all indexed items (and at least a minimum number of them), such as an
+instruction repeated across the questions of a training set, are dropped from the index
+after every benchmark is loaded. See [configuration.md](configuration.md).
+
 **Subtraction splits.** If a benchmark sets `subtraction_splits` (for example
 `[train]`), n-grams that also occur in those splits are removed from the index. What
 remains is specific to the protected split, so a corpus that legitimately contains the

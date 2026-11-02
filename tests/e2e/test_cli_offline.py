@@ -542,3 +542,67 @@ def test_min_item_coverage_flags_a_long_document_holding_an_item(
     _cli("report", "--scan-dir", str(out), env=env)
     md = (out / "report" / "report.md").read_text("utf-8")
     assert "- Min item coverage: `0.5`" in md
+
+
+def test_item_stopgrams_drop_a_repeated_instruction(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    instruction = "write python code to solve the following problem carefully and fast"
+    topics = [
+        "reverse a singly linked list in place without allocating extra nodes",
+        "count the vowels inside every sentence of a long english paragraph",
+        "merge overlapping calendar intervals and report the free time slots",
+        "detect cycles within a directed dependency graph using depth first search",
+    ]
+    items = tmp_path / "code.jsonl"
+    items.write_text(
+        "".join(json.dumps({"q": f"{instruction} {t}"}) + "\n" for t in topics),
+        encoding="utf-8",
+    )
+    spec = {
+        "name": "Code",
+        "dataset": "json",
+        "data_files": {"test": items.as_posix()},
+        "splits": ["test"],
+        "fields": ["q"],
+    }
+    cfg = tmp_path / "code.yaml"
+    cfg.write_text(
+        yaml.safe_dump(
+            {
+                "benchmarks": [spec],
+                "ngram": 5,
+                "min_hits": 3,
+                "stopgrams": {"items": {"max_item_share": 0.5, "min_count": 3}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    out = tmp_path / "code.native"
+    proc = _cli(
+        "build-index", "--config", str(cfg), "--out-index", str(out),
+        "--allow-unpinned",
+        env=env,
+    )  # fmt: skip
+    assert "item stop-grams: dropped" in proc.stdout
+    assert out.with_name(out.name + ".item_stopgrams").exists()
+    meta = json.loads(out.with_name(out.name + ".meta.json").read_text("utf-8"))
+    assert meta["item_stopgrams"]["dropped"] > 0
+    proc = _cli("inspect-index", "--index", str(out), env=env)
+    assert "items format: v2" in proc.stdout
+    assert "item stop-grams:" in proc.stdout
+
+    # A document with only the instruction is no longer flagged.
+    shards = tmp_path / "code_shards"
+    shards.mkdir()
+    pq.write_table(
+        pa.table({"text": [f"{instruction} then summarise the weather report"]}),
+        shards / "s.parquet",
+    )
+    scan_out = tmp_path / "code_out"
+    _cli(
+        "scan", "--input", str(shards), "--index", str(out), "--config", str(cfg),
+        "--out-dir", str(scan_out), "--workers", "1",
+        env=env,
+    )  # fmt: skip
+    assert _summary(scan_out)["total_contaminated"] == 0

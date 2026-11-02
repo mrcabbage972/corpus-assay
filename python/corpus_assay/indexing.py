@@ -20,7 +20,7 @@ from corpus_assay.attribution import AttributionIndex
 from corpus_assay.benchmark_registry import REGISTRY
 from corpus_assay.benchmark_spec import BenchmarkSpec
 from corpus_assay.benchmarks import BenchmarkLoader, BenchmarkLoadStatus
-from corpus_assay.config import BuildIndexConfig
+from corpus_assay.config import BuildIndexConfig, ItemStopGramsConfig
 from corpus_assay.constants import FIELD_SEPARATOR, INDEX_FORMAT_VERSION
 from corpus_assay.formats import FileType, write_header
 from corpus_assay.inspect import format_benchmark_table
@@ -29,6 +29,7 @@ from corpus_assay.scanner.fingerprint import (
     library_version,
     rust_extension_version,
 )
+from corpus_assay.stopgrams import write_stopgrams_header
 from corpus_assay.text_utils import iter_ngrams_with_filter
 
 
@@ -151,6 +152,25 @@ class BenchmarkBuildStats:
 
 
 @dataclass(frozen=True)
+class ItemStopGramsResult:
+    """The n-grams dropped as item stop-grams, and the thresholds used."""
+
+    max_item_share: float
+    min_count: int
+    n_items: int
+    hashes: list[int]
+
+    def to_meta(self, file_name: str) -> dict[str, object]:
+        return {
+            "max_item_share": self.max_item_share,
+            "min_count": self.min_count,
+            "n_items": self.n_items,
+            "dropped": len(self.hashes),
+            "file": file_name,
+        }
+
+
+@dataclass(frozen=True)
 class BuildIndexResult:
     ngram: int
     hashes: set[int]
@@ -159,6 +179,7 @@ class BuildIndexResult:
     benchmark_specs: list[dict[str, object]]
     dataset_fingerprints: list[dict[str, object]]
     benchmark_stats: list[BenchmarkBuildStats] = field(default_factory=list)
+    item_stopgrams: ItemStopGramsResult | None = None
 
 
 def build_index(
@@ -167,9 +188,14 @@ def build_index(
     ngram: int,
     min_hits: int = 3,
     loader_factory: Callable[[BenchmarkSpec], BenchmarkLoader] = BenchmarkLoader,
+    item_stopgrams: ItemStopGramsConfig | None = None,
 ) -> BuildIndexResult:
     """
     Pure core: computes hashes + attribution in memory. No filesystem I/O.
+
+    With ``item_stopgrams``, n-grams held by more than its ``max_item_share`` of
+    all items (and at least ``min_count`` items) are dropped after every
+    benchmark is loaded, before the counts below are taken.
 
     Also counts, per benchmark, the items and n-grams indexed and the items the
     n-gram rule cannot flag (fewer than ``min_hits`` n-grams); see
@@ -235,8 +261,22 @@ def build_index(
             )
         )
 
-    # Hash counts are final only after every benchmark (later ones never remove
-    # hashes, but count from the finished map to match the .sources.json totals).
+    # Item stop-grams need every benchmark's items, so they are dropped here.
+    stop_result: ItemStopGramsResult | None = None
+    if item_stopgrams is not None:
+        stop_result = ItemStopGramsResult(
+            max_item_share=item_stopgrams.max_item_share,
+            min_count=item_stopgrams.min_count,
+            n_items=len(attribution.items_meta),
+            hashes=attribution.drop_item_stopgrams(
+                max_item_share=item_stopgrams.max_item_share,
+                min_count=item_stopgrams.min_count,
+            ),
+        )
+
+    # Hash counts are final only after every benchmark and the item stop-grams
+    # (count from the finished map to match the .sources.json totals), so the
+    # unflaggable-item counts reflect what the scan can match.
     per_source = attribution.per_source_totals()
     for bstats, (start, end) in zip(benchmark_stats, item_ranges):
         sid = attribution.name_to_id.get(bstats.name)
@@ -258,6 +298,7 @@ def build_index(
         benchmark_specs=benchmark_specs,
         dataset_fingerprints=dataset_fingerprints,
         benchmark_stats=benchmark_stats,
+        item_stopgrams=stop_result,
     )
 
 
@@ -387,6 +428,10 @@ def write_native_index_artifacts(result: BuildIndexResult, out_path: str) -> Non
         },
         "benchmark_stats": [b.to_meta() for b in result.benchmark_stats],
     }
+    stop_name = f"{Path(out_path).name}.item_stopgrams"
+    if result.item_stopgrams is not None:
+        meta["item_stopgrams"] = result.item_stopgrams.to_meta(stop_name)
+        meta["files"]["item_stopgrams"] = stop_name
 
     has_items = result.attribution.has_items()
     if has_items:
@@ -402,6 +447,21 @@ def write_native_index_artifacts(result: BuildIndexResult, out_path: str) -> Non
     result.attribution.write_legend(out_path, per_source_total)
     if has_items:
         result.attribution.write_items_sidecar(out_path, ngram=result.ngram)
+    stop_path = Path(out_path).with_name(stop_name)
+    if result.item_stopgrams is not None:
+        _write_item_stopgrams(stop_path, result.item_stopgrams, ngram=result.ngram)
+    else:
+        stop_path.unlink(missing_ok=True)  # from an earlier build at this path
+
+
+def _write_item_stopgrams(
+    path: Path, stopgrams: ItemStopGramsResult, *, ngram: int
+) -> None:
+    """The dropped hashes, in the stop-grams format (CASTOP1 header, sorted u64)."""
+    with path.open("wb") as f:
+        write_stopgrams_header(f, ngram=ngram, record_count=len(stopgrams.hashes))
+        for h in sorted(stopgrams.hashes):
+            f.write(struct.pack("<Q", h))
 
 
 def build_index_hf(cfg: BuildIndexConfig) -> None:
@@ -415,7 +475,10 @@ def build_index_hf(cfg: BuildIndexConfig) -> None:
     # Create the output directory before the (possibly long) benchmark download.
     Path(cfg.out_path).parent.mkdir(parents=True, exist_ok=True)
     result = build_index(
-        benchmarks=cfg.benchmarks, ngram=cfg.ngram, min_hits=cfg.min_hits
+        benchmarks=cfg.benchmarks,
+        ngram=cfg.ngram,
+        min_hits=cfg.min_hits,
+        item_stopgrams=cfg.item_stopgrams,
     )
     # Checked before anything is written, so a failed build leaves no index behind.
     problems = check_benchmarks_not_empty(
@@ -461,6 +524,13 @@ def _report_build_stats(
         print(
             f"  {unflaggable:,} item(s) have fewer than min_hits={min_hits} n-grams; "
             "the n-gram rule cannot flag them."
+        )
+    stop = result.item_stopgrams
+    if stop is not None:
+        print(
+            f"  item stop-grams: dropped {len(stop.hashes):,} n-gram(s) held by more "
+            f"than {stop.max_item_share:g} of the {stop.n_items:,} items (and at "
+            f"least {stop.min_count}); the counts above are after the drop."
         )
     for message in problems or []:
         print(f"  WARNING (--allow-empty-benchmarks): {message}")

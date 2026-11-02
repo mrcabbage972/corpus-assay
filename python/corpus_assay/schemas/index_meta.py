@@ -4,7 +4,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-# v2 adds ``benchmark_stats``. v1 files (no stats) still load.
+# v2 adds ``benchmark_stats`` (and the optional ``item_stopgrams``). v1 files
+# (no stats) still load.
 INDEX_META_SCHEMA_VERSION = 2
 
 
@@ -33,6 +34,20 @@ class BenchmarkStats(BaseModel):
     min_hits: int | None = None
 
 
+class ItemStopGramsMeta(BaseModel):
+    """Index-time stop-grams learned from the items (optional, schema v2)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_item_share: float
+    min_count: int
+    # Items the share was taken of, and the n-grams dropped.
+    n_items: int
+    dropped: int
+    # The dropped hashes, as a stop-grams file next to the index.
+    file: str | None = None
+
+
 class IndexMeta(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -52,3 +67,5 @@ class IndexMeta(BaseModel):
     hf_datasets: list[dict[str, Any]] = Field(default_factory=list)
     files: dict[str, Any] | None = None
     benchmark_stats: list[BenchmarkStats] = Field(default_factory=list)
+    # Present when the index was built with `stopgrams.items`.
+    item_stopgrams: ItemStopGramsMeta | None = None

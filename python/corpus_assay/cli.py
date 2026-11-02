@@ -23,6 +23,7 @@ from corpus_assay.config import (
     DEFAULT_PACKED_DOC_SEP,
     BuildIndexConfig,
     DecontaminationConfig,
+    ItemStopGramsConfig,
     ScanConfig,
     SpacedSeedsConfig,
     load_decontamination_config,
@@ -598,16 +599,50 @@ def build_index(
     allow_empty_benchmarks: bool = typer.Option(
         False, "--allow-empty-benchmarks", help=_ALLOW_EMPTY_BENCHMARKS_HELP
     ),
+    item_stopgrams_share: float | None = typer.Option(
+        None,
+        "--item-stopgrams-share",
+        min=0.0,
+        max=1.0,
+        help=(
+            "Drop n-grams held by more than this share of all indexed items (e.g. "
+            "0.01), such as an instruction line repeated across the items, so a "
+            "wrapped copy of an item still matches in full. Overrides "
+            "stopgrams.items.max_item_share and turns item stop-grams on."
+        ),
+        show_default="config, else off",
+    ),
+    item_stopgrams_min_count: int | None = typer.Option(
+        None,
+        "--item-stopgrams-min-count",
+        min=2,
+        help=(
+            "Only drop n-grams held by at least this many items. Overrides "
+            "stopgrams.items.min_count and turns item stop-grams on."
+        ),
+        show_default="config, else 10",
+    ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Plan index build only; do not execute."
     ),
 ) -> None:
     """Download HF benchmarks and build native index (.native)."""
     cfg = load_decontamination_config(config)
+    item_stopgrams = _resolve_item_stopgrams(
+        cfg,
+        max_item_share=item_stopgrams_share,
+        min_count=item_stopgrams_min_count,
+    )
     if dry_run:
         typer.echo(f"Would build native index at: {out_index}")
         typer.echo(f"Benchmarks: {len(cfg.benchmarks)}")
         typer.echo(f"ngram={cfg.ngram}")
+        if item_stopgrams is not None:
+            typer.echo(
+                "Item stop-grams: "
+                f"max_item_share={item_stopgrams.max_item_share:g} "
+                f"min_count={item_stopgrams.min_count}"
+            )
         raise typer.Exit(code=0)
     with _empty_benchmarks_exit():
         build_index_hf(
@@ -618,8 +653,36 @@ def build_index(
                 allow_unpinned=allow_unpinned,
                 allow_empty_benchmarks=allow_empty_benchmarks,
                 min_hits=cfg.min_hits,
+                item_stopgrams=item_stopgrams,
             )
         )
+
+
+def _resolve_item_stopgrams(
+    cfg: DecontaminationConfig,
+    *,
+    max_item_share: float | None,
+    min_count: int | None,
+) -> ItemStopGramsConfig | None:
+    """``stopgrams.items`` from the config, with the build-index flags applied.
+
+    Either flag turns item stop-grams on (the other setting from the config, or
+    its default).
+    """
+    base = cfg.stopgrams.items if cfg.stopgrams else None
+    if max_item_share is None and min_count is None:
+        return base
+    update: dict[str, Any] = {}
+    if max_item_share is not None:
+        update["max_item_share"] = max_item_share
+    if min_count is not None:
+        update["min_count"] = min_count
+    try:
+        return ItemStopGramsConfig.model_validate(
+            {**(base.model_dump() if base else {}), **update}
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(f"Invalid item stop-gram settings: {exc}") from exc
 
 
 @app.command("build-stopgrams-direct")
@@ -842,6 +905,15 @@ def inspect_index_cmd(
         f"  native_records: {info['native_records']} (header={info['native_header']})"
     )
     typer.echo(f"  attr_records: {info['attr_records']} (header={info['attr_header']})")
+    if info.get("items_format") is not None:
+        typer.echo(f"  items format: v{info['items_format']}")
+    stop = info.get("item_stopgrams")
+    if isinstance(stop, dict):
+        typer.echo(
+            f"  item stop-grams: {stop['dropped']:,} n-gram(s) dropped (held by more "
+            f"than {stop['max_item_share']:g} of {stop['n_items']:,} items, and at "
+            f"least {stop['min_count']})"
+        )
     _echo_benchmark_stats(info)
 
 

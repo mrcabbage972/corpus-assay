@@ -46,6 +46,17 @@ All notable changes to this project are documented here. The format follows
   `ScanConfig.packed_doc_sep` and the Rust `scan_stream_rust` accept `None`, and the
   run manifest records `packed_doc_sep: null`.
 
+- Stop-grams learned from the indexed items (#11). `stopgrams.items: {max_item_share:
+  0.01, min_count: 10}` (off by default; `build-index --item-stopgrams-share` and
+  `--item-stopgrams-min-count` override it, and either turns it on) drops at index time
+  the n-grams held by more than that share of all items and by at least `min_count`
+  items, such as an instruction repeated across a training set's questions. They leave
+  `.native`, `.attr` and `.items`, items' `n_protected_hashes` and the per-benchmark
+  counts are taken after the drop, the dropped hashes go to `<index>.item_stopgrams`
+  (stop-grams format), and the index meta records `item_stopgrams` (thresholds, item
+  count, number dropped). `build-index` prints the count, and `inspect-index` prints it
+  with the `.items` format version. The meta field is optional, so the meta schema
+  stays at version 2.
 - Per-item coverage (#2). Records' `item_hits` entries gain `item_ngrams` (the
   item's indexed n-grams) and `item_coverage = hits / item_ngrams`, the share of the
   item one document holds. `--min-item-coverage C` (on `scan`, `run`, `run-hf`;
@@ -121,7 +132,8 @@ All notable changes to this project are documented here. The format follows
 
 - A resumed scan reused shard summaries computed against an earlier `.items` or
   `.items.meta.json` when the item sidecars were rebuilt in place (only `.native`,
-  `.attr` and `.meta.json` were fingerprinted). The run fingerprint now hashes both.
+  `.attr` and `.meta.json` were fingerprinted). The run fingerprint now hashes both,
+  and `.item_stopgrams`. Shards scanned by an earlier version are re-scanned once.
 - The `run`/`run-hf` index cache was keyed on the config file's text, so a config
   naming registry keys reused an index built from the old registry entries after the
   registry changed. The key now also hashes the resolved benchmark specs. Existing
