@@ -1078,7 +1078,7 @@ def run_hf(
 
     if dry_run:
         cache_dir = Path(index_cache_dir)
-        native_index = index_cache_path(cfg_path, cache_dir)
+        native_index = index_cache_path(cfg_path, cache_dir, benchmarks=cfg.benchmarks)
         if native_index_ready(native_index):
             typer.echo(f"Would use cached native index: {native_index}")
         else:
@@ -1265,7 +1265,7 @@ def run(
     out_dir_p = Path(out_dir)
     if dry_run:
         cache_dir = Path(index_cache_dir)
-        native_index = index_cache_path(cfg_path, cache_dir)
+        native_index = index_cache_path(cfg_path, cache_dir, benchmarks=cfg.benchmarks)
         if native_index_ready(native_index):
             typer.echo(f"Would use cached native index: {native_index}")
         else:

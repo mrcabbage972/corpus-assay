@@ -51,6 +51,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- The `run`/`run-hf` index cache was keyed on the config file's text, so a config
+  naming registry keys reused an index built from the old registry entries after the
+  registry changed. The key now also hashes the resolved benchmark specs. Existing
+  cached indexes are rebuilt once.
+
 - `validate-config --check-remote` rejected datasets whose card lists no splits even
   though their `data_files` load (for example `opencompass/AIME2025`: "splits not found
   ... Available: []"). It now takes the split names from the `data_files` keys.

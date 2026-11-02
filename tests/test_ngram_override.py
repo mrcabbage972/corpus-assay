@@ -40,7 +40,10 @@ def test_index_cache_key_tracks_active_config(
     tmp_path: Path, no_stopwords_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = tmp_path / "config.yaml"
-    config.write_text("ngram: 13\n", encoding="utf-8")
+    config.write_text(
+        "benchmarks: [{name: B, dataset: json, splits: [test], fields: [q]}]\n",
+        encoding="utf-8",
+    )
     default_key = index_cache_path(config, tmp_path)
 
     monkeypatch.setattr(
