@@ -29,6 +29,12 @@ All notable changes to this project are documented here. The format follows
   3 13-grams, and notes. `describe-benchmark` prints it after the spec, as YAML comments.
 - `--all-records` on `scan`, `run` and `run-hf` writes every flagged record to
   `contaminated_docs/` (same as `--max-return-records 0`).
+- `--no-split` on `scan`, `run` and `run-hf` turns off packed-document splitting
+  (both `<|endoftext|>` and its typo variant): each record is scored as one document
+  and its doc id is the plain `<id>`, without a `-part-<k>` suffix. In the config,
+  `background.corpus.packed_doc_sep: null` does the same for `build-stopgrams-direct`.
+  `ScanConfig.packed_doc_sep` and the Rust `scan_stream_rust` accept `None`, and the
+  run manifest records `packed_doc_sep: null`.
 
 ### Changed
 

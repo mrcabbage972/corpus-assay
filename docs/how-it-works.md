@@ -68,7 +68,9 @@ Each shard is processed by one worker process, in this order:
 2. Each row is split into **sub-documents** on `<|endoftext|>`, the packed-document
    separator; the variant typo `<|endoftext}>` is treated the same way. Sub-documents
    shorter than `2·n` bytes or `n` tokens are skipped. Counts and records refer to
-   sub-documents, with ids `<id>-part-<k>`.
+   sub-documents, with ids `<id>-part-<k>`. `--no-split` turns this off (for chat data
+   or decoded text that may legitimately contain the token): each row is then one
+   document, with id `<id>`.
 3. The sub-document is normalized and its **distinct** allowed n-gram hashes are
    collected.
 4. If stop-grams are enabled, hashes in the stop-gram set are removed. The coverage

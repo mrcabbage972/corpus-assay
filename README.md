@@ -297,7 +297,7 @@ if __name__ == "__main__":  # required: scan workers are spawned processes
 - JSONL shards are loaded fully into memory and converted to Parquet before scanning.
   Use Parquet for very large shards.
 - Documents are split on `<|endoftext|>`, and each part is scored separately. Records are
-  named `<id>-part-<k>`.
+  named `<id>-part-<k>`. Pass `--no-split` to score each record whole.
 - Only verbatim overlap is detected; see [above](#what-it-detects-and-what-it-doesnt).
 
 ## Documentation

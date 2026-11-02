@@ -14,7 +14,7 @@ def scan_stream_rust(
     min_coverage: float,
     index_backend: str = "auto",
     out_hits_path: str | None = None,
-    packed_doc_sep: str = "<|endoftext|>",
+    packed_doc_sep: str | None = "<|endoftext|>",
     packed_doc_sep_typo: str | None = "<|endoftext}>",
     max_return_records: int | None = 500,
     stopgrams_path: str | None = None,

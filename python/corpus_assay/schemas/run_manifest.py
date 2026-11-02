@@ -25,7 +25,8 @@ class RunScanConfig(BaseModel):
     n: int
     min_hits: int
     min_coverage: float
-    packed_doc_sep: str
+    # None: packed-document splitting was off (--no-split).
+    packed_doc_sep: str | None
     packed_doc_sep_typo: str | None
     stopgrams_path: str | None = None
 

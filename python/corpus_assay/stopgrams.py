@@ -235,7 +235,7 @@ def _iter_documents_from_rows(
     rows: Any,
     *,
     fields: list[str],
-    packed_doc_sep: str,
+    packed_doc_sep: str | None,
     packed_doc_sep_typo: str | None,
 ) -> Any:
     for row in rows:
@@ -251,9 +251,14 @@ def _iter_documents_from_rows(
         if not parts:
             continue
         merged = "\n".join(parts)
-        if packed_doc_sep_typo:
-            merged = merged.replace(packed_doc_sep_typo, packed_doc_sep)
-        for segment in merged.split(packed_doc_sep):
+        if packed_doc_sep is None:
+            # Splitting disabled: the whole record is one document.
+            segments = [merged]
+        else:
+            if packed_doc_sep_typo:
+                merged = merged.replace(packed_doc_sep_typo, packed_doc_sep)
+            segments = merged.split(packed_doc_sep)
+        for segment in segments:
             segment = segment.strip()
             if segment:
                 yield segment
@@ -283,7 +288,7 @@ def _build_stopgrams_part(
     revision: str | None,
     fields: list[str],
     ngram: int,
-    packed_doc_sep: str,
+    packed_doc_sep: str | None,
     packed_doc_sep_typo: str | None,
     worker_id: int,
     num_workers: int,
@@ -390,7 +395,7 @@ def build_stopgrams_direct_from_hf_dataset(
     revision: str | None,
     fields: list[str],
     ngram: int,
-    packed_doc_sep: str,
+    packed_doc_sep: str | None,
     packed_doc_sep_typo: str | None,
     tau: float,
     out_path: str | Path,

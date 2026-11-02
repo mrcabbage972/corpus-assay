@@ -17,6 +17,9 @@ from pydantic import (
 from corpus_assay.benchmark_registry import REGISTRY
 from corpus_assay.benchmark_spec import BenchmarkSpec
 
+DEFAULT_PACKED_DOC_SEP = "<|endoftext|>"
+DEFAULT_PACKED_DOC_SEP_TYPO = "<|endoftext}>"
+
 
 class DecontaminationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -71,8 +74,11 @@ class ScanConfig(BaseModel):
     min_coverage: float = Field(default=0.001, ge=0.0, le=1.0)
     workers: int = os.cpu_count() or 1
     index_backend: str = "auto"
-    packed_doc_sep: str = "<|endoftext|>"
-    packed_doc_sep_typo: str | None = "<|endoftext}>"
+    # Records are split on this separator and each part is scored on its own.
+    # `None` turns splitting off (and the typo replacement with it): a record is
+    # one document, and its doc id gets no `-part-<k>` suffix.
+    packed_doc_sep: str | None = DEFAULT_PACKED_DOC_SEP
+    packed_doc_sep_typo: str | None = DEFAULT_PACKED_DOC_SEP_TYPO
     # Cap on the flagged sub-document records returned per shard (the
     # `contaminated_docs/` sample: the first N flagged, in scan order). `None` (or
     # 0, normalized to `None`) returns every flagged record; hits.bin is always
@@ -131,6 +137,16 @@ class ScanConfig(BaseModel):
         return mode
 
     @model_validator(mode="after")
+    def _validate_packed_doc_sep(self) -> "ScanConfig":
+        if self.packed_doc_sep == "":
+            raise ValueError(
+                "packed_doc_sep must be non-empty; use None to disable splitting"
+            )
+        if self.packed_doc_sep is None:
+            self.packed_doc_sep_typo = None
+        return self
+
+    @model_validator(mode="after")
     def _validate_stopgrams(self) -> "ScanConfig":
         if self.stopgrams_path is not None and not self.stopgrams_path:
             raise ValueError("stopgrams_path must be non-empty if set")
@@ -173,8 +189,9 @@ class BackgroundCorpusConfig(BaseModel):
     split: str = "train"
     fields: list[str] = Field(default_factory=list)
     revision: str | None = None
-    packed_doc_sep: str = "<|endoftext|>"
-    packed_doc_sep_typo: str | None = "<|endoftext}>"
+    # `null` keeps every background document whole (no packed-document split).
+    packed_doc_sep: str | None = DEFAULT_PACKED_DOC_SEP
+    packed_doc_sep_typo: str | None = DEFAULT_PACKED_DOC_SEP_TYPO
 
     @model_validator(mode="after")
     def _require_exactly_one_source(self) -> "BackgroundCorpusConfig":
@@ -190,6 +207,12 @@ class BackgroundCorpusConfig(BaseModel):
             raise ValueError(
                 "'fields' must be a non-empty list when 'dataset' (HuggingFace) is set."
             )
+        if self.packed_doc_sep == "":
+            raise ValueError(
+                "packed_doc_sep must be non-empty; use null to disable splitting"
+            )
+        if self.packed_doc_sep is None:
+            self.packed_doc_sep_typo = None
         return self
 
 

@@ -747,3 +747,37 @@ def test_scan_record_cap_flags(
     )
     assert result.exit_code == 0, result.output
     assert patch_scan_pipeline["do_scan"][0].max_return_records == expected
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"), [([], "<|endoftext|>"), (["--no-split"], None)]
+)
+def test_scan_no_split_flag(
+    tmp_path: Path,
+    tmp_cfg_file: Path,
+    patch_config_loader: None,
+    patch_scan_pipeline: dict[str, Any],
+    flags: list[str],
+    expected: str | None,
+) -> None:
+    idx = tmp_path / "idx.native"
+    idx.write_text("x", encoding="utf-8")
+    result = runner.invoke(
+        cli.app,
+        [
+            "scan",
+            "--input",
+            str(tmp_path / "*.parquet"),
+            "--index",
+            str(idx),
+            "--out-dir",
+            str(tmp_path / "out"),
+            "--config",
+            str(tmp_cfg_file),
+            *flags,
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    scan_cfg = patch_scan_pipeline["do_scan"][0]
+    assert scan_cfg.packed_doc_sep == expected
+    assert (scan_cfg.packed_doc_sep_typo is None) == (expected is None)

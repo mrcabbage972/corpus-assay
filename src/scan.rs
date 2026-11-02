@@ -20,6 +20,7 @@ use byteorder::{LittleEndian, WriteBytesExt};
 use hashbrown::{HashMap, HashSet};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::Serialize;
+use std::borrow::Cow;
 use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -95,7 +96,10 @@ fn load_stopgrams_cached(path: &str) -> PyResult<Arc<StopGramsSet>> {
 struct PreparedScan {
     text_key: String,
     id_key: Option<String>,
-    packed_doc_sep: String,
+    /// Separator that packed records are split on. `None` disables splitting (and
+    /// the typo replacement): each record is one document and its id gets no
+    /// `-part-<k>` suffix.
+    packed_doc_sep: Option<String>,
     packed_doc_sep_typo: Option<String>,
     backend: IndexBackend,
     out_hits_path: Option<String>,
@@ -252,6 +256,17 @@ fn item_gate(
     (flagged, best_hits, evidence)
 }
 
+/// The parts of a packed record: split on `sep`, or the whole text when `sep` is
+/// `None` (no splitting).
+fn split_packed<'a>(text: &'a str, sep: Option<&'a str>) -> impl Iterator<Item = &'a str> + 'a {
+    let mut whole = Some(text);
+    let mut parts = sep.map(|sep| text.split(sep));
+    std::iter::from_fn(move || match parts.as_mut() {
+        Some(parts) => parts.next(),
+        None => whole.take(),
+    })
+}
+
 #[derive(Clone)]
 struct ScanLimits {
     max_return_records: Option<usize>,
@@ -332,10 +347,9 @@ where
                 continue;
             }
 
-            let packed_text: String = if let Some(ref typo) = cfg.packed_doc_sep_typo {
-                packed_text_original.replace(typo, &cfg.packed_doc_sep)
-            } else {
-                packed_text_original.to_string()
+            let packed_text: Cow<'_, str> = match (&cfg.packed_doc_sep, &cfg.packed_doc_sep_typo) {
+                (Some(sep), Some(typo)) => Cow::Owned(packed_text_original.replace(typo, sep)),
+                _ => Cow::Borrowed(packed_text_original),
             };
 
             let original_id_val: Option<&str> = id_array.and_then(|arr| {
@@ -347,7 +361,7 @@ where
             });
 
             for (sub_doc_index, sub_text) in
-                packed_text.as_str().split(&cfg.packed_doc_sep).enumerate()
+                split_packed(&packed_text, cfg.packed_doc_sep.as_deref()).enumerate()
             {
                 let sub_text: &str = sub_text;
                 if sub_text.is_empty() || (sub_text.len() < cfg.n * 2) {
@@ -483,14 +497,15 @@ where
                 if flagged {
                     total_contaminated += 1;
 
-                    let sub_doc_id = if let Some(original_id) = original_id_val {
-                        if !original_id.is_empty() {
-                            format!("{}-part-{}", original_id, sub_doc_index)
-                        } else {
-                            doc_identity_rust(None, sub_text)
+                    let sub_doc_id = match original_id_val {
+                        Some(original_id) if !original_id.is_empty() => {
+                            if cfg.packed_doc_sep.is_some() {
+                                format!("{}-part-{}", original_id, sub_doc_index)
+                            } else {
+                                original_id.to_string()
+                            }
                         }
-                    } else {
-                        doc_identity_rust(None, sub_text)
+                        _ => doc_identity_rust(None, sub_text),
                     };
 
                     let mut src_hits_vec: Vec<(u32, usize)> = Vec::with_capacity(hits_by_src.len());
@@ -566,7 +581,7 @@ fn prepare_scan(
     min_hits: usize,
     min_coverage: f64,
     out_hits_path: Option<&str>,
-    packed_doc_sep: &str,
+    packed_doc_sep: Option<&str>,
     packed_doc_sep_typo: Option<&str>,
     stopgrams_path: Option<&str>,
     gate_mode: &str,
@@ -588,8 +603,10 @@ fn prepare_scan(
     if !(0.0..=1.0).contains(&min_coverage) {
         return Err(PyValueError::new_err("min_coverage must be in [0,1]"));
     }
-    if packed_doc_sep.is_empty() {
-        return Err(PyValueError::new_err("packed_doc_sep must be non-empty"));
+    if packed_doc_sep == Some("") {
+        return Err(PyValueError::new_err(
+            "packed_doc_sep must be non-empty (pass None to disable splitting)",
+        ));
     }
     let index_ngram = get_index_ngram(index_path)?;
     if index_ngram != n {
@@ -682,9 +699,11 @@ fn prepare_scan(
     Ok(PreparedScan {
         text_key: text_key.to_string(),
         id_key: id_key.map(|s| s.to_string()),
-        packed_doc_sep: packed_doc_sep.to_string(),
-        packed_doc_sep_typo: match packed_doc_sep_typo {
-            Some(typo) if !typo.is_empty() => Some(typo.to_string()),
+        packed_doc_sep: packed_doc_sep.map(str::to_string),
+        // The typo variant is only rewritten into the separator; with splitting
+        // off there is nothing to rewrite it into.
+        packed_doc_sep_typo: match (packed_doc_sep, packed_doc_sep_typo) {
+            (Some(_), Some(typo)) if !typo.is_empty() => Some(typo.to_string()),
             _ => None,
         },
         backend,
@@ -727,7 +746,7 @@ fn pyfile_to_tempfile(obj: &Bound<'_, PyAny>) -> PyResult<File> {
 
 #[allow(clippy::too_many_arguments)]
 #[pyfunction]
-#[pyo3(signature = (input, text_key, id_key, index_path, n, min_hits, min_coverage, index_backend="auto", out_hits_path=None, packed_doc_sep="<|endoftext|>", packed_doc_sep_typo="<|endoftext}>", max_return_records=Some(500), stopgrams_path=None, gate_mode="auto", min_longest_run=0, spaced_path=None, spaced_min_loci=3, spaced_ver_min_span=17, spaced_ver_identity=0.85, boilerplate_threshold=50))]
+#[pyo3(signature = (input, text_key, id_key, index_path, n, min_hits, min_coverage, index_backend="auto", out_hits_path=None, packed_doc_sep=Some("<|endoftext|>"), packed_doc_sep_typo=Some("<|endoftext}>"), max_return_records=Some(500), stopgrams_path=None, gate_mode="auto", min_longest_run=0, spaced_path=None, spaced_min_loci=3, spaced_ver_min_span=17, spaced_ver_identity=0.85, boilerplate_threshold=50))]
 pub fn scan_stream_rust(
     py: Python<'_>,
     input: Bound<'_, PyAny>,
@@ -739,7 +758,7 @@ pub fn scan_stream_rust(
     min_coverage: f64,
     index_backend: &str,
     out_hits_path: Option<&str>,
-    packed_doc_sep: &str,
+    packed_doc_sep: Option<&str>,
     packed_doc_sep_typo: Option<&str>,
     max_return_records: Option<usize>,
     stopgrams_path: Option<&str>,

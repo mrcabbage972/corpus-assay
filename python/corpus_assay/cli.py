@@ -20,6 +20,7 @@ from corpus_assay.benchmark_registry import (
     SHORT_ITEM_NGRAM,
 )
 from corpus_assay.config import (
+    DEFAULT_PACKED_DOC_SEP,
     BuildIndexConfig,
     DecontaminationConfig,
     ScanConfig,
@@ -387,6 +388,16 @@ class ScanOptions(NamedTuple):
     index_backend: str = typer.Option(
         "auto", help="Index backend: auto, memory, or mmap."
     )
+    no_split: bool = typer.Option(
+        False,
+        "--no-split",
+        help=(
+            "Do not split records on the packed-document separator "
+            "(<|endoftext|> and its typo variant): each record is one document, "
+            "and doc ids get no -part-<k> suffix. Use for chat data or decoded "
+            "text that may legitimately contain the token."
+        ),
+    )
     gate_mode: str = typer.Option("union", help=_GATE_MODE_HELP)
     min_longest_run: int = typer.Option(0, help=_MIN_LONGEST_RUN_HELP)
     boilerplate_threshold: int = typer.Option(50, help=_BOILERPLATE_THRESHOLD_HELP)
@@ -506,6 +517,7 @@ def _scan_config_from_options(
         out_dir=str(out_dir),
         workers=opts.workers,
         index_backend=opts.index_backend,
+        packed_doc_sep=None if opts.no_split else DEFAULT_PACKED_DOC_SEP,
         max_return_records=None if opts.all_records else opts.max_return_records,
         stopgrams_path=_resolve_stopgrams_path(cfg, stopgrams_path=opts.stopgrams),
         spaced_path=resolved_spaced.path,
