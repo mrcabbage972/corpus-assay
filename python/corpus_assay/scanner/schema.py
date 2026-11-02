@@ -146,6 +146,11 @@ class ContaminationRecord(BaseModel):
     field: str | None = None
     role: str | None = None
     turn: int | None = None
+    # v3: packed part index within the field or turn (absent with --no-split)
+    # and the record's 0-based row in its shard (JSONL: among non-blank lines).
+    # Absent in older records.
+    part: int | None = None
+    row_index: int | None = None
     # v3, exact channel: the items whose question occurs verbatim.
     exact_hits: list[ExactHit] = Field(default_factory=list)
     # v3: channels that flagged the sub-document ("ngram", "spaced", "exact").

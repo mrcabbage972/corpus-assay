@@ -156,7 +156,7 @@ normalization hashes.
                   "item_ngrams": 90, "item_coverage": 0.944,
                   "field_hits": [[0, 60], [1, 25]],
                   "fields_matched": ["question", "choices"]}],
-   "field": "text", "channels": ["ngram"]}
+   "channels": ["ngram"], "field": "text", "part": 0, "row_index": 417}
   ```
 
   A short item flagged by the exact channel, with `--confirm`:
@@ -218,10 +218,15 @@ normalization hashes.
   - `field` is the column the sub-document came from (a text key, or the messages
     key). For a chat turn, `role` is the turn's role (omitted when it has none) and
     `turn` its index in the messages list, counted from 0.
+  - `row_index` is the record's row in the shard, counted from 0 (for JSONL, the
+    index among the non-blank lines: blank and whitespace-only lines are not rows),
+    and `part` the index of the packed part within the field or turn (the `<k>` of
+    `-part-<k>`; absent under `--no-split`). Together with `field` and `turn` they
+    locate the sub-document without parsing the doc id; `filter` uses them.
   - Schema history: v3 added `field`, `role` and `turn`, and later the optional
     `item_hits` fields `item_ngrams`, `item_coverage`, `field_hits` and
-    `fields_matched`, then `channels`, `exact_hits` and the text evidence fields;
-    v2 added `item_hits` and
+    `fields_matched`, then `channels`, `exact_hits` and the text evidence fields,
+    then `row_index` and `part`; v2 added `item_hits` and
     `spaced_item`. Readers (`inspect-run`, `report`) still accept v2 records.
 
 ## Reports (`report`)

@@ -138,6 +138,13 @@ struct FileScanResult<'a> {
     /// Index of the turn in the messages list (messages column only).
     #[serde(skip_serializing_if = "Option::is_none")]
     turn: Option<u32>,
+    /// Index of the packed part within the field or turn (`-part-<k>`); absent
+    /// without splitting (`--no-split`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    part: Option<usize>,
+    /// 0-based row of the record in the scanned shard (for JSONL input, the
+    /// index among the non-blank lines).
+    row_index: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -867,7 +874,12 @@ struct ShardScan<'c> {
 }
 
 impl ShardScan<'_> {
-    fn scan_segment(&mut self, id: Option<&str>, seg: &Segment<'_>) -> Result<(), String> {
+    fn scan_segment(
+        &mut self,
+        row_index: u64,
+        id: Option<&str>,
+        seg: &Segment<'_>,
+    ) -> Result<(), String> {
         if seg.text.is_empty() {
             return Ok(());
         }
@@ -938,6 +950,8 @@ impl ShardScan<'_> {
                 field: Some(seg.field),
                 role: seg.role,
                 turn: seg.turn,
+                part: cfg.packed_doc_sep.is_some().then_some(part),
+                row_index,
             };
             self.results
                 .push(serde_json::to_string(&rec).map_err(|e| e.to_string())?);
@@ -1195,8 +1209,11 @@ where
         item_best: HashMap::new(),
     };
 
+    let mut row_offset: u64 = 0;
     for batch_result in arrow_reader.by_ref() {
         let batch: RecordBatch = batch_result.map_err(|e| e.to_string())?;
+        let batch_offset = row_offset;
+        row_offset += batch.num_rows() as u64;
 
         let texts: Vec<(&str, StringArray)> = text_cols
             .iter()
@@ -1212,6 +1229,7 @@ where
         };
 
         for row in 0..batch.num_rows() {
+            let row_index = batch_offset + row as u64;
             let id: Option<&str> = ids
                 .as_ref()
                 .filter(|ids| ids.is_valid(row))
@@ -1226,7 +1244,7 @@ where
                         turn: None,
                         text: array.value(row),
                     };
-                    shard.scan_segment(id, &seg)?;
+                    shard.scan_segment(row_index, id, &seg)?;
                 }
             }
             if let Some((field, messages)) = &messages {
@@ -1237,7 +1255,7 @@ where
                         turn: Some(turn),
                         text,
                     };
-                    shard.scan_segment(id, &seg)?;
+                    shard.scan_segment(row_index, id, &seg)?;
                 }
             }
         }

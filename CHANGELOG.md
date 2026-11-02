@@ -124,6 +124,11 @@ All notable changes to this project are documented here. The format follows
   (`confirmed_pairs`, `template_variants`) and `template_variants.csv` / `.json`.
 - The run manifest's `scan_config` records `exact_channel`, `exact_min_chars` and
   `confirm` (absent in older manifests: off).
+- Records (schema v3, optional fields) gain `row_index`, the record's row in its
+  shard counted from 0 (for JSONL, among the non-blank lines, as the scan reads
+  them), and `part`, the packed part's index within its field or turn (the `<k>` of
+  `-part-<k>`; absent under `--no-split`), so a flagged sub-document can be located
+  without parsing its doc id. Older records still parse.
 
 ### Changed
 
