@@ -243,7 +243,7 @@ def test_benchmark_loader_wildcard_resolves_and_drops(monkeypatch) -> None:
     assert out == ["cfg=alpha"]
 
 
-def test_benchmark_loader_split_not_found_warns_and_yields_nothing(monkeypatch) -> None:
+def test_benchmark_loader_split_not_found_records_failure(monkeypatch) -> None:
     spec = BenchmarkSpec(
         name="SplitWarn",
         dataset="demo/splits",
@@ -259,6 +259,11 @@ def test_benchmark_loader_split_not_found_warns_and_yields_nothing(monkeypatch) 
 
     loader = BenchmarkLoader(spec)
     assert list(loader.load_positive()) == []
+    # The loader still yields nothing, but records why so build-index can fail.
+    assert loader.load_status.rows == 0
+    assert loader.load_status.failures == [
+        "config='alpha' split='validation': split not found"
+    ]
 
 
 def test_benchmark_loader_multiple_splits_and_rows(monkeypatch) -> None:
@@ -287,7 +292,8 @@ def test_benchmark_loader_multiple_splits_and_rows(monkeypatch) -> None:
 
 def test_benchmark_loader_config_failure_continues(monkeypatch, capsys) -> None:
     """
-    If one config fails to load, loader should warn and continue with remaining configs.
+    If one config fails to load, loader should warn and continue with remaining
+    configs, recording the failure next to the rows that did load.
     """
     spec = BenchmarkSpec(
         name="ConfigFail",
@@ -306,6 +312,11 @@ def test_benchmark_loader_config_failure_continues(monkeypatch, capsys) -> None:
 
     loader = BenchmarkLoader(spec)
     assert list(loader.load_positive()) == ["ok"]
+    assert loader.load_status.rows == 1
+    assert loader.load_status.loaded == ["config='good' split='test'"]
+    assert loader.load_status.failures == [
+        "config='bad' split='test': RuntimeError: boom"
+    ]
 
 
 def test_benchmark_loader_wildcard_resolution_failure_warns(monkeypatch) -> None:
@@ -326,6 +337,10 @@ def test_benchmark_loader_wildcard_resolution_failure_warns(monkeypatch) -> None
 
     loader = BenchmarkLoader(spec)
     assert list(loader.load_positive()) == []
+    assert loader.load_status.rows == 0
+    (failure,) = loader.load_status.failures
+    assert "failed to resolve wildcard configs" in failure
+    assert "RuntimeError: nope" in failure
 
 
 def test_explicit_all_is_not_auto_dropped(monkeypatch):

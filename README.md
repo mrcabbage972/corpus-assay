@@ -114,11 +114,14 @@ shows an entry's spec and notes.
 **2. Build the index.** This downloads the benchmark splits from the Hugging Face Hub:
 
 ```bash
-corpus-assay build-index --config config.yaml --out-index bench.native --allow-unpinned
+corpus-assay build-index --config config.yaml --out-index bench.native
 ```
 
-Without `--allow-unpinned`, benchmarks that have no `revision` are rejected. Pin
-revisions in the config to make the index reproducible, then drop the flag.
+Benchmarks you add without a `revision` are rejected unless you pass `--allow-unpinned`.
+If a benchmark loads no rows (a removed or gated dataset, a wrong split or path) or
+indexes no n-grams, the build fails and writes nothing; `--allow-empty-benchmarks`
+builds the index anyway. The build ends with a per-benchmark table of items and
+n-grams, including the items too short for the n-gram rule to flag.
 
 **3. Scan your corpus.** Shards can be Parquet files or JSONL files, optionally `.gz` or
 `.zst` compressed. Pass directories, globs, or files:
@@ -182,7 +185,7 @@ benchmarks:
 | `list-benchmarks`, `describe-benchmark` | Browse the built-in benchmark registry |
 | `validate-config` | Validate a config (`--check-remote` resolves configs and splits on the Hub) |
 | `build-index` | Build the n-gram index (`.native` + sidecars) |
-| `inspect-index` | Validate an index and its sidecars |
+| `inspect-index` | Validate an index and list per-benchmark item and n-gram counts |
 | `scan` | Scan Parquet/JSONL shards against an index |
 | `run`, `run-hf` | Build or reuse a cached index, then scan local shards or an HF split |
 | `report` | Leak reports (JSON, CSV, Markdown) from a scan directory |

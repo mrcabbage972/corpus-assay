@@ -90,14 +90,30 @@ together with `arc`. `gsm8k` indexes the question only; add `gsm8k_solutions` to
 catch copies of the worked solutions.
 
 **Gated datasets.** `gpqa_diamond` needs a Hub login (`hf auth login`) and the dataset's
-terms accepted on its Hub page. Without them it loads nothing.
+terms accepted on its Hub page. Without them it loads nothing, and `build-index` fails
+with a message saying so.
+
+### Empty benchmarks
+
+`build-index` (and the index build inside `run` and `run-hf`) fails, writing nothing,
+when a benchmark loads no rows or indexes no n-grams. The error names each such
+benchmark and the reason: the load error, a missing split, or fields too short for
+`ngram`. Pass `--allow-empty-benchmarks` to build the index anyway; the problems are
+then printed as warnings. A benchmark that loads only some of its configs or splits is
+not an error, but each failure is logged.
+
+The index's `.meta.json` records per-benchmark counts (items, n-grams, items with no
+n-grams, items with fewer than `min_hits` n-grams). `build-index` prints them as a
+table at the end of the build, and `inspect-index` prints them for an existing index.
 
 **Short items.** N-grams never cross fields, so a field shorter than `ngram`
-normalized tokens contributes nothing to the index. COPA's fields are one short
-sentence each, so a 13-gram index contains none of its items. WinoGrande and OpenBookQA
-are only partly covered. `build-index` warns about benchmarks that end up with no
-n-grams. For such benchmarks, build a separate index with a smaller `ngram` (for example
-8) and validate its false-positive rate on clean text before relying on it.
+normalized tokens contributes nothing to the index, and an item with fewer than
+`min_hits` n-grams can never be flagged by the n-gram rule. The registry table above
+gives the share per benchmark; `build-index` and `inspect-index` count these items for
+any index. COPA's fields are one short sentence each, so a 13-gram index contains none
+of its items, and `build-index` fails on it unless `--allow-empty-benchmarks` is
+passed. For such benchmarks, build a separate index with a smaller `ngram` (for
+example 8) and validate its false-positive rate on clean text before relying on it.
 
 ## `background` and `stopgrams`
 

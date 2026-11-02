@@ -1,4 +1,5 @@
 import logging
+from dataclasses import dataclass, field
 from typing import Any, Iterator, Mapping, Sequence
 
 from datasets import get_dataset_config_names
@@ -90,6 +91,19 @@ def _concat_fields(obj: Any, keys: list[str]) -> str:
     return f" {FIELD_SEPARATOR} ".join(chunks)
 
 
+@dataclass
+class BenchmarkLoadStatus:
+    """What loading a benchmark's positive splits produced, for build-time checks."""
+
+    rows: int = 0
+    # "config=... split=..." entries that loaded.
+    loaded: list[str] = field(default_factory=list)
+    # Why a config or split did not load.
+    failures: list[str] = field(default_factory=list)
+    # Warnings about the loaded rows (e.g. hidden labels).
+    warnings: list[str] = field(default_factory=list)
+
+
 class BenchmarkLoader:
     """
     Encapsulates logic for loading texts from a benchmark spec.
@@ -104,6 +118,9 @@ class BenchmarkLoader:
         self.spec = spec
         self.dataset_fingerprints: list[dict[str, Any]] = []
         self._fingerprint_keys: set[tuple[str, str | None, str]] = set()
+        # Status of the last load_positive() call (rows, failures, warnings).
+        self.load_status = BenchmarkLoadStatus()
+        self._config_error: str | None = None
 
     @property
     def name(self) -> str:
@@ -111,20 +128,24 @@ class BenchmarkLoader:
 
     def load_positive(self) -> Iterator[str]:
         """Yields texts from spec.splits (data to index)."""
+        self.load_status = BenchmarkLoadStatus()
         if not self.spec.splits:
             return
-        yield from self._load_splits(self.spec.splits)
+        yield from self._load_splits(self.spec.splits, status=self.load_status)
 
     def load_negative(self) -> Iterator[str]:
         """Yields texts from spec.subtraction_splits (data to subtract)."""
         if not self.spec.subtraction_splits:
             return
-        yield from self._load_splits(self.spec.subtraction_splits)
+        yield from self._load_splits(
+            self.spec.subtraction_splits, status=BenchmarkLoadStatus()
+        )
 
     def resolve_config_names(self) -> Sequence[str | None]:
         return self._resolve_config_names()
 
     def _resolve_config_names(self) -> Sequence[str | None]:
+        self._config_error = None
         if self.spec.config_name is not None:
             return [self.spec.config_name]
         raw_configs = list(self.spec.configs or [])
@@ -144,10 +165,11 @@ class BenchmarkLoader:
         if not has_wildcard:
             resolved = [c for c in raw_configs if c not in drop_set]
             if not resolved:
-                logger.warning(
-                    f"  [{self.name}] WARNING: Config list resolved to empty after drop_configs. "
-                    f"configs={raw_configs!r} drop_configs={sorted(drop_set)!r}",
+                self._config_error = (
+                    "config list resolved to empty after drop_configs "
+                    f"(configs={raw_configs!r} drop_configs={sorted(drop_set)!r})"
                 )
+                logger.warning(f"  [{self.name}] WARNING: {self._config_error}")
             return resolved
 
         # -------------------------
@@ -163,10 +185,11 @@ class BenchmarkLoader:
             except TypeError:
                 available = get_dataset_config_names(self.spec.dataset)
         except Exception as exc:
-            logger.error(
-                f"  [{self.name}] ERROR: Failed to resolve wildcard configs for "
-                f"dataset={self.spec.dataset!r}: {exc}",
+            self._config_error = (
+                f"failed to resolve wildcard configs for "
+                f"dataset={self.spec.dataset!r}: {type(exc).__name__}: {exc}"
             )
+            logger.error(f"  [{self.name}] ERROR: {self._config_error}")
             return []
 
         available_set = set(available)
@@ -190,23 +213,33 @@ class BenchmarkLoader:
             resolved = ["all"]
 
         if not resolved:
-            logger.warning(
-                f"  [{self.name}] WARNING: Wildcard matched 0 configs after filtering. "
-                f"dataset={self.spec.dataset!r} drop_configs={sorted(drop_set)!r} "
-                f"(available={len(available)})",
+            self._config_error = (
+                "wildcard matched 0 configs after filtering "
+                f"(dataset={self.spec.dataset!r} drop_configs={sorted(drop_set)!r}, "
+                f"available={len(available)})"
             )
+            logger.warning(f"  [{self.name}] WARNING: {self._config_error}")
 
         return resolved
 
-    def _load_splits(self, target_splits: list[str]) -> Iterator[str]:
+    def _load_splits(
+        self,
+        target_splits: list[str],
+        *,
+        status: BenchmarkLoadStatus,
+    ) -> Iterator[str]:
         """Iterate resolved configs -> load dataset -> yield concatenated text for requested splits."""
         config_names = self._resolve_config_names()
+        if not config_names:
+            status.failures.append(self._config_error or "no configs resolved")
+            return
         found_any = False
         last_config_name: str | None = None
 
         for config_name in config_names:
             last_config_name = config_name
             for split in target_splits:
+                where = f"config={config_name!r} split={split!r}"
                 try:
                     load_kwargs = {
                         "split": split,
@@ -226,15 +259,16 @@ class BenchmarkLoader:
                             **load_kwargs,
                         )
                 except Exception as exc:
+                    status.failures.append(f"{where}: {type(exc).__name__}: {exc}")
                     logger.warning(
                         f"  [{self.name}] WARNING: Failed to load "
-                        f"dataset={self.spec.dataset!r} config={config_name!r} "
-                        f"split={split!r}: {exc}",
+                        f"dataset={self.spec.dataset!r} {where}: {exc}",
                     )
                     continue
 
                 if isinstance(ds, Mapping):
                     if split not in ds:
+                        status.failures.append(f"{where}: split not found")
                         logger.warning(
                             f"  [{self.name}] WARNING: Split '{split}' not found for "
                             f"config={config_name!r}.",
@@ -245,8 +279,10 @@ class BenchmarkLoader:
                     rows = ds
 
                 found_any = True
+                status.loaded.append(where)
                 self._record_dataset_fingerprint(ds, rows, config_name, split)
                 for row in rows:
+                    status.rows += 1
                     yield _concat_fields(row, self.spec.fields)
 
         if not found_any:

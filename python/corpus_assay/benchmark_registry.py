@@ -504,7 +504,12 @@ REGISTRY = BenchmarkRegistry(
             scored_split="validation",
             item_count=100,
             short_items=100,
-            notes=(_HIDDEN_TEST_LABELS,),
+            notes=(
+                _HIDDEN_TEST_LABELS,
+                "Every field is one short sentence, so at ngram=13 no item has an "
+                "n-gram and build-index fails on this benchmark. Give it its own "
+                "index with a smaller ngram, or pass --allow-empty-benchmarks.",
+            ),
         ),
         "lambada": RegistryEntry(
             BenchmarkSpec(

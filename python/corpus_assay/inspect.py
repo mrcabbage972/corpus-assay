@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Iterable
 
+from corpus_assay.attribution import AttributionIndex
 from corpus_assay.formats import (
     HEADER_SIZE,
     BinaryHeader,
@@ -50,7 +51,91 @@ def _validate_binary_file(
     return False, size // record_size, None
 
 
-def inspect_index(index_path: Path) -> dict[str, object]:
+def _sidecar(index_path: Path, suffix: str) -> Path:
+    return index_path.with_name(f"{index_path.name}{suffix}")
+
+
+def index_benchmark_stats(
+    index_path: Path, meta: IndexMeta, *, min_hits: int | None = None
+) -> tuple[list[dict[str, object]], int]:
+    """Per-benchmark counts for an index, and the min_hits they were counted at.
+
+    Prefers the per-item table in ``.items.meta.json`` (so any ``min_hits`` can be
+    applied), then the counts recorded in the meta (schema v2), then the per-source
+    totals in ``.sources.json`` (old indexes). Counts that cannot be recovered are
+    None.
+    """
+    recorded = {b.name: b for b in meta.benchmark_stats}
+    effective_min_hits = min_hits
+    if effective_min_hits is None:
+        effective_min_hits = next(
+            (b.min_hits for b in meta.benchmark_stats if b.min_hits is not None), 3
+        )
+
+    names: list[str] = [b.name for b in meta.benchmark_stats]
+    for spec in meta.benchmark_specs:
+        name = spec.get("name")
+        if isinstance(name, str) and name not in names:
+            names.append(name)
+
+    ngrams_by_name: dict[str, int] = {}
+    sources_path = _sidecar(index_path, ".sources.json")
+    if sources_path.exists():
+        legend = AttributionIndex.load_legend(str(sources_path))
+        for sid, name in enumerate(legend.id_to_name):
+            ngrams_by_name[name] = (legend.per_source_total or {}).get(sid, 0)
+            if name not in names:
+                names.append(name)
+
+    items_by_name: dict[str, list[int]] | None = None
+    items_meta_path = _sidecar(index_path, ".items.meta.json")
+    if items_meta_path.exists():
+        payload = json.loads(items_meta_path.read_text(encoding="utf-8"))
+        items_by_name = {}
+        for item in payload.get("items", []):
+            name = str(item.get("benchmark"))
+            items_by_name.setdefault(name, []).append(
+                int(item.get("n_protected_hashes", 0))
+            )
+            if name not in names:
+                names.append(name)
+
+    rows: list[dict[str, object]] = []
+    for name in names:
+        rec = recorded.get(name)
+        row: dict[str, object] = {
+            "name": name,
+            "items": rec.items if rec else None,
+            "ngrams": (
+                rec.ngrams
+                if rec
+                else ngrams_by_name.get(name, 0)
+                if sources_path.exists()
+                else None
+            ),
+            "items_zero_ngrams": rec.items_zero_ngrams if rec else None,
+            "items_below_min_hits": (
+                rec.items_below_min_hits
+                if rec and rec.min_hits == effective_min_hits
+                else None
+            ),
+        }
+        if items_by_name is not None:
+            # The sidecar lists every registered item, including those with no
+            # n-grams, so it is authoritative when present.
+            counts = items_by_name.get(name, [])
+            row["items"] = len(counts)
+            row["items_zero_ngrams"] = sum(1 for c in counts if c == 0)
+            row["items_below_min_hits"] = sum(
+                1 for c in counts if c < effective_min_hits
+            )
+        rows.append(row)
+    return rows, effective_min_hits
+
+
+def inspect_index(
+    index_path: Path, *, min_hits: int | None = None
+) -> dict[str, object]:
     meta_path = index_path.with_name(f"{index_path.name}.meta.json")
     attr_path = index_path.with_name(f"{index_path.name}.attr")
 
@@ -79,14 +164,39 @@ def inspect_index(index_path: Path) -> dict[str, object]:
             f"{attr_path} header ngram {attr_header.ngram_n} != meta ngram {meta.ngram}."
         )
 
+    benchmark_stats, stats_min_hits = index_benchmark_stats(
+        index_path, meta, min_hits=min_hits
+    )
     return {
         "ngram": meta.ngram,
+        "schema_version": meta.schema_version,
         "index_format_version": meta.index_format_version,
         "native_records": native_count,
         "native_header": native_has_header,
         "attr_records": attr_count,
         "attr_header": attr_has_header,
+        "benchmark_stats": benchmark_stats,
+        "min_hits": stats_min_hits,
     }
+
+
+def format_benchmark_table(
+    rows: list[tuple[str, str, str, str, str]],
+    *,
+    min_hits: int | None,
+    indent: str = "",
+) -> str:
+    """Render per-benchmark (name, items, ngrams, 0 n-grams, < min_hits) rows."""
+    below = f"< {min_hits} n-grams" if min_hits is not None else "< min_hits"
+    header = ("benchmark", "items", "n-grams", "0 n-grams", below)
+    widths = [max(len(r[i]) for r in [header, *rows]) for i in range(len(header))]
+
+    def _fmt(row: tuple[str, ...]) -> str:
+        cells = [row[0].ljust(widths[0])]
+        cells += [cell.rjust(widths[i]) for i, cell in enumerate(row[1:], start=1)]
+        return indent + "  ".join(cells).rstrip()
+
+    return "\n".join([_fmt(header), *(_fmt(r) for r in rows)])
 
 
 def _iter_ndjson_files(paths: Iterable[Path]) -> Iterable[Path]:

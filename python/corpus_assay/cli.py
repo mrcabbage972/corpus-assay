@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import NamedTuple
 
@@ -24,8 +25,8 @@ from corpus_assay.config import (
     load_decontamination_config,
 )
 from corpus_assay.constants import DEFAULT_INDEX_CACHE_DIR
-from corpus_assay.indexing import build_index_hf
-from corpus_assay.inspect import inspect_index, inspect_run
+from corpus_assay.indexing import EmptyBenchmarkError, build_index_hf
+from corpus_assay.inspect import format_benchmark_table, inspect_index, inspect_run
 from corpus_assay.reporting import generate_report_from_scan_dir
 from corpus_assay.scanner import OutputLayout, do_scan, write_run_outputs
 from corpus_assay.scanner.fingerprint import _file_sha256, library_version
@@ -80,6 +81,10 @@ _MIN_LONGEST_RUN_HELP = (
     "With --gate-mode item, also require a contiguous run of >= this many normalized "
     "tokens shared with the matching item (0 disables)."
 )
+_ALLOW_EMPTY_BENCHMARKS_HELP = (
+    "Build the index even if a benchmark loads no rows or indexes no n-grams "
+    "(by default the build fails and writes nothing)."
+)
 _BOILERPLATE_THRESHOLD_HELP = (
     "Item fan-out at/above which a matched n-gram is counted as boilerplate in the "
     "per-item attribution split (unique/shared/boilerplate); must be >= 2."
@@ -132,6 +137,16 @@ def configure_logging(
         from corpus_assay.normalization import set_ngram_config_path
 
         set_ngram_config_path(str(ngram_config))
+
+
+@contextmanager
+def _empty_benchmarks_exit() -> Iterator[None]:
+    """Turn an empty-benchmark build failure into a clean non-zero exit."""
+    try:
+        yield
+    except EmptyBenchmarkError as exc:
+        typer.echo(f"[build-index] ERROR: {exc}", err=True)
+        raise typer.Exit(code=1) from None
 
 
 def _run_scan(scan_cfg: ScanConfig, out_dir: Path) -> None:
@@ -355,6 +370,9 @@ def build_index(
         "--allow-unpinned",
         help="Allow benchmarks without a pinned revision.",
     ),
+    allow_empty_benchmarks: bool = typer.Option(
+        False, "--allow-empty-benchmarks", help=_ALLOW_EMPTY_BENCHMARKS_HELP
+    ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Plan index build only; do not execute."
     ),
@@ -366,14 +384,17 @@ def build_index(
         typer.echo(f"Benchmarks: {len(cfg.benchmarks)}")
         typer.echo(f"ngram={cfg.ngram}")
         raise typer.Exit(code=0)
-    build_index_hf(
-        BuildIndexConfig(
-            out_path=out_index,
-            ngram=cfg.ngram,
-            benchmarks=cfg.benchmarks,
-            allow_unpinned=allow_unpinned,
+    with _empty_benchmarks_exit():
+        build_index_hf(
+            BuildIndexConfig(
+                out_path=out_index,
+                ngram=cfg.ngram,
+                benchmarks=cfg.benchmarks,
+                allow_unpinned=allow_unpinned,
+                allow_empty_benchmarks=allow_empty_benchmarks,
+                min_hits=cfg.min_hits,
+            )
         )
-    )
 
 
 @app.command("build-stopgrams-direct")
@@ -571,16 +592,83 @@ def list_benchmarks() -> None:
 @app.command("inspect-index")
 def inspect_index_cmd(
     index: str = typer.Option(..., help="Path to the .native index."),
+    min_hits: int | None = typer.Option(
+        None,
+        "--min-hits",
+        min=1,
+        help=(
+            "Count items with fewer than this many n-grams (default: the min_hits "
+            "the index was built with, else 3). Needs the .items.meta.json sidecar "
+            "for values other than the recorded one."
+        ),
+    ),
 ) -> None:
-    """Validate an index and its sidecars."""
-    info = inspect_index(Path(index))
+    """Validate an index and its sidecars.
+
+    Also lists, per benchmark, the items and n-grams indexed and the items the
+    n-gram rule cannot flag.
+    """
+    info = inspect_index(Path(index), min_hits=min_hits)
     typer.echo("Index inspection:")
     typer.echo(f"  ngram: {info['ngram']}")
+    typer.echo(f"  meta schema_version: {info['schema_version']}")
     typer.echo(f"  index_format_version: {info['index_format_version']}")
     typer.echo(
         f"  native_records: {info['native_records']} (header={info['native_header']})"
     )
     typer.echo(f"  attr_records: {info['attr_records']} (header={info['attr_header']})")
+    _echo_benchmark_stats(info)
+
+
+def _echo_benchmark_stats(info: dict[str, object]) -> None:
+    stats = info.get("benchmark_stats")
+    if not isinstance(stats, list) or not stats:
+        typer.echo("  benchmarks: (no per-benchmark counts recorded)")
+        return
+    min_hits = info.get("min_hits")
+    min_hits = min_hits if isinstance(min_hits, int) else None
+
+    def _cell(value: object) -> str:
+        return f"{value:,}" if isinstance(value, int) else "?"
+
+    rows = [
+        (
+            str(row["name"]),
+            _cell(row.get("items")),
+            _cell(row.get("ngrams")),
+            _cell(row.get("items_zero_ngrams")),
+            _cell(row.get("items_below_min_hits")),
+        )
+        for row in stats
+    ]
+    typer.echo("  benchmarks:")
+    typer.echo(
+        format_benchmark_table(
+            rows,
+            min_hits=min_hits,
+            indent="    ",
+        )
+    )
+    zero = [r.get("items_zero_ngrams") for r in stats]
+    below = [r.get("items_below_min_hits") for r in stats]
+    if all(isinstance(v, int) for v in zero + below):
+        typer.echo(
+            f"  unflaggable items: {sum(v for v in zero if isinstance(v, int)):,} "
+            f"with 0 n-grams, {sum(v for v in below if isinstance(v, int)):,} with "
+            f"fewer than min_hits={min_hits} n-grams (0 included). The n-gram rule "
+            "cannot flag these items."
+        )
+    else:
+        typer.echo(
+            "  unflaggable items: unknown for some benchmarks. Counting them needs "
+            "the .items.meta.json sidecar, or counts recorded at build time (indexes "
+            "built since index meta schema v2) at the same min_hits."
+        )
+    empty = [
+        str(r["name"]) for r in stats if r.get("items") == 0 or r.get("ngrams") == 0
+    ]
+    if empty:
+        typer.echo(f"  WARNING: benchmarks indexed empty: {', '.join(empty)}")
 
 
 @app.command("inspect-run")
@@ -926,6 +1014,9 @@ def run_hf(
         "--allow-unpinned",
         help="Allow benchmarks without a pinned revision.",
     ),
+    allow_empty_benchmarks: bool = typer.Option(
+        False, "--allow-empty-benchmarks", help=_ALLOW_EMPTY_BENCHMARKS_HELP
+    ),
     index_cache_dir: str = typer.Option(
         str(DEFAULT_INDEX_CACHE_DIR),
         help="Directory to cache built native indexes (honors XDG_CACHE_HOME).",
@@ -1014,9 +1105,13 @@ def run_hf(
         typer.echo(f"Would write outputs under: {out_dir_p}")
         raise typer.Exit(code=0)
 
-    native_index = _ensure_native_index(
-        cfg_path, Path(index_cache_dir), allow_unpinned=allow_unpinned
-    )
+    with _empty_benchmarks_exit():
+        native_index = _ensure_native_index(
+            cfg_path,
+            Path(index_cache_dir),
+            allow_unpinned=allow_unpinned,
+            allow_empty_benchmarks=allow_empty_benchmarks,
+        )
 
     if trust_remote_code:
         logger.warning("!" * 72)
@@ -1126,6 +1221,9 @@ def run(
         "--allow-unpinned",
         help="Allow benchmarks without a pinned revision.",
     ),
+    allow_empty_benchmarks: bool = typer.Option(
+        False, "--allow-empty-benchmarks", help=_ALLOW_EMPTY_BENCHMARKS_HELP
+    ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Plan run only; do not execute."
     ),
@@ -1179,9 +1277,13 @@ def run(
         typer.echo(f"Would write outputs under: {plan.out_dir}")
         raise typer.Exit(code=0)
 
-    native_index = _ensure_native_index(
-        cfg_path, Path(index_cache_dir), allow_unpinned=allow_unpinned
-    )
+    with _empty_benchmarks_exit():
+        native_index = _ensure_native_index(
+            cfg_path,
+            Path(index_cache_dir),
+            allow_unpinned=allow_unpinned,
+            allow_empty_benchmarks=allow_empty_benchmarks,
+        )
     resolved_stopgrams = _resolve_stopgrams_path(cfg, stopgrams_path=stopgrams)
     resolved_spaced = _resolve_spaced(cfg, spaced_path=spaced_seeds)
     scan_cfg = ScanConfig(

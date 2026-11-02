@@ -61,7 +61,11 @@ def index_cache_path(config_path: Path, cache_dir: Path) -> Path:
 
 
 def ensure_native_index(
-    cfg_path: Path, cache_dir: Path, *, allow_unpinned: bool = False
+    cfg_path: Path,
+    cache_dir: Path,
+    *,
+    allow_unpinned: bool = False,
+    allow_empty_benchmarks: bool = False,
 ) -> Path:
     cache_dir.mkdir(parents=True, exist_ok=True)
     native_path = index_cache_path(cfg_path, cache_dir)
@@ -85,6 +89,8 @@ def ensure_native_index(
             ngram=cfg.ngram,
             benchmarks=cfg.benchmarks,
             allow_unpinned=allow_unpinned,
+            allow_empty_benchmarks=allow_empty_benchmarks,
+            min_hits=cfg.min_hits,
         )
     )
     logger.info("Wrote native index to: %s", native_path)

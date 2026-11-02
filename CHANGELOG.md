@@ -8,6 +8,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `build-index` fails, writing nothing, when a configured benchmark loads no rows or
+  indexes no n-grams (#5). The error names each such benchmark and the reason (the load
+  error, a missing split, or fields too short for `ngram`). For a gated dataset it says
+  to log in with `hf auth login` and accept the dataset terms. `--allow-empty-benchmarks`
+  builds the index anyway, on `build-index`, `run` and `run-hf`.
+- Per-benchmark counts in the index metadata (`benchmark_stats`: items, n-grams, items
+  with no n-grams, items with fewer than `min_hits` n-grams). `build-index` ends with a
+  table of them, and `inspect-index` prints them with the number of items the n-gram rule
+  cannot flag (`--min-hits` recounts against another threshold). For older indexes,
+  `inspect-index` derives the counts from `.sources.json` and `.items.meta.json`.
 - Registry entries (#14): `aime24`, `aime25`, `amc23`, `math500`, `gsm8k_solutions`,
   `jeebench`, `gpqa_diamond`, `humaneval`, `mbpp`, `livecodebench`, `ifeval`,
   `commonsenseqa`, `arc_challenge`, `arc_easy`, `piqa`. Each entry carries metadata: the
@@ -16,6 +26,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **Index metadata schema version 2.** `<index>.native.meta.json` gains
+  `benchmark_stats`, and its `benchmark_specs` entries gain `label_field`.
+  `INDEX_META_SCHEMA_VERSION` goes from 1 to 2. Version 1 files still load. The binary
+  index formats and hashes are unchanged, so existing indexes keep their meaning.
 - **Registry entries changed in place.** A config that names these keys now indexes
   different text, so rebuild indexes built from them:
   - `mmlu`: the `all` config instead of every subject config, fields `question, choices`

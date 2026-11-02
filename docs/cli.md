@@ -50,6 +50,7 @@ $ corpus-assay build-index [OPTIONS]
 * `--out-index <str>`: Output path for native index (e.g., index.native).  [required]
 * `--config <str>`: YAML config with decontamination hyperparameters.  [required]
 * `--allow-unpinned`: Allow benchmarks without a pinned revision.
+* `--allow-empty-benchmarks`: Build the index even if a benchmark loads no rows or indexes no n-grams (by default the build fails and writes nothing).
 * `--dry-run`: Plan index build only; do not execute.
 * `--help`: Show this message and exit.
 
@@ -137,6 +138,9 @@ $ corpus-assay list-benchmarks [OPTIONS]
 
 Validate an index and its sidecars.
 
+Also lists, per benchmark, the items and n-grams indexed and the items the
+n-gram rule cannot flag.
+
 **Usage**:
 
 ```console
@@ -146,6 +150,7 @@ $ corpus-assay inspect-index [OPTIONS]
 **Options**:
 
 * `--index <str>`: Path to the .native index.  [required]
+* `--min-hits <int range>`: Count items with fewer than this many n-grams (default: the min_hits the index was built with, else 3). Needs the .items.meta.json sidecar for values other than the recorded one.  [x&gt;=1]
 * `--help`: Show this message and exit.
 
 ## `corpus-assay inspect-run`
@@ -276,6 +281,7 @@ $ corpus-assay run-hf [OPTIONS]
 * `--boilerplate-threshold <int>`: Item fan-out at/above which a matched n-gram is counted as boilerplate in the per-item attribution split (unique/shared/boilerplate); must be &gt;= 2.  [default: 50]
 * `--max-return-records <int>`: Max contaminated document records to return per shard (sample only; use 0 to disable).  [default: 500]
 * `--allow-unpinned`: Allow benchmarks without a pinned revision.
+* `--allow-empty-benchmarks`: Build the index even if a benchmark loads no rows or indexes no n-grams (by default the build fails and writes nothing).
 * `--index-cache-dir <str>`: Directory to cache built native indexes (honors XDG_CACHE_HOME).  [default: (~/.cache/corpus-assay/indexes)]
 * `--hf-cache-dir <str>`: Optional Hugging Face datasets cache dir (defaults to HF cache).
 * `--parquet-rows-per-file <int>`: Max rows per parquet shard when materializing; use 0 to force a single file.  [default: 500000]
@@ -312,6 +318,7 @@ $ corpus-assay run [OPTIONS]
 * `--boilerplate-threshold <int>`: Item fan-out at/above which a matched n-gram is counted as boilerplate in the per-item attribution split (unique/shared/boilerplate); must be &gt;= 2.  [default: 50]
 * `--max-return-records <int>`: Max contaminated document records to return per shard (sample only; use 0 to disable).  [default: 500]
 * `--allow-unpinned`: Allow benchmarks without a pinned revision.
+* `--allow-empty-benchmarks`: Build the index even if a benchmark loads no rows or indexes no n-grams (by default the build fails and writes nothing).
 * `--dry-run`: Plan run only; do not execute.
 * `--index-cache-dir <str>`: Directory to cache built native indexes (honors XDG_CACHE_HOME).  [default: (~/.cache/corpus-assay/indexes)]
 * `--stopgrams <str>`: Path to stop-grams native file (optional).
