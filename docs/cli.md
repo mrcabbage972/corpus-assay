@@ -238,7 +238,8 @@ $ corpus-assay scan [OPTIONS]
 * `--input, --input-glob <str>`: Input path(s): directory, glob (recursive), or file list. Repeat --input for multiple.  [required]
 * `--index <str>`: Path to the .native index.  [required]
 * `--out-dir <str>`: Directory for per-file outputs and summaries.  [required]
-* `--text-key <str>`: Field name containing document text (default: text).  [default: text]
+* `--text-key <str>`: Column containing document text. Repeat to scan several columns (e.g. --text-key prompt --text-key chosen --text-key rejected); each is scanned as its own document. Default: text (none when --messages-key is given).
+* `--messages-key <str>`: Chat column holding a list of {role, content} messages; each turn is scanned as its own document and records carry its role and turn index.
 * `--id-key <str>`: Optional stable doc id field (otherwise hashed from text).
 * `--workers <int>`: Parallel worker processes.  [default: (CPU count)]
 * `--index-backend <str>`: Index backend: auto, memory, or mmap.  [default: auto]
@@ -274,7 +275,8 @@ $ corpus-assay run-hf [OPTIONS]
 * `--split <str>`: Dataset split to scan.  [default: train]
 * `--hf-revision <str>`: Pinned HF dataset revision (commit hash or tag).
 * `--out-dir <str>`: Directory for per-file outputs and summaries.  [required]
-* `--text-key <str>`: Field name containing document text (default: text).  [default: text]
+* `--text-key <str>`: Column containing document text. Repeat to scan several columns (e.g. --text-key prompt --text-key chosen --text-key rejected); each is scanned as its own document. Default: text (none when --messages-key is given).
+* `--messages-key <str>`: Chat column holding a list of {role, content} messages; each turn is scanned as its own document and records carry its role and turn index.
 * `--id-key <str>`: Optional stable doc id field (otherwise hashed from text).
 * `--workers <int>`: Parallel worker processes.  [default: (CPU count)]
 * `--index-backend <str>`: Index backend: auto, memory, or mmap.  [default: auto]
@@ -313,7 +315,8 @@ $ corpus-assay run [OPTIONS]
 * `--config <str>`: YAML config with decontamination hyperparameters.  [required]
 * `--input, --input-glob <str>`: Input path(s): directory, glob (recursive), or file list. Repeat --input for multiple.  [required]
 * `--out-dir <str>`: Directory for per-file outputs and summaries.  [required]
-* `--text-key <str>`: Field name containing document text (default: text).  [default: text]
+* `--text-key <str>`: Column containing document text. Repeat to scan several columns (e.g. --text-key prompt --text-key chosen --text-key rejected); each is scanned as its own document. Default: text (none when --messages-key is given).
+* `--messages-key <str>`: Chat column holding a list of {role, content} messages; each turn is scanned as its own document and records carry its role and turn index.
 * `--id-key <str>`: Optional stable doc id field (otherwise hashed from text).
 * `--workers <int>`: Parallel worker processes.  [default: (CPU count)]
 * `--index-backend <str>`: Index backend: auto, memory, or mmap.  [default: auto]

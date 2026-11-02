@@ -198,7 +198,9 @@ passed. `run`/`run-hf` also key their index cache on that hash.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--text-key` / `--id-key` | `text` / none | Columns to read. Without an id, records use a hash of the text. |
+| `--text-key` | `text` | Text column; repeat it to scan several (each is its own document). |
+| `--messages-key` | none | Chat column of `{role, content}` turns; each turn is its own document. |
+| `--id-key` | none | Id column (any type castable to string). Without an id, records use a hash of the text. |
 | `--workers` | CPU count | Worker processes (one shard at a time each). |
 | `--index-backend` | `auto` | `memory` or `mmap`; `auto` uses mmap when `workers > 1`. |
 | `--gate-mode` | `union` | `union` or `item` (see [how-it-works.md](how-it-works.md)). |

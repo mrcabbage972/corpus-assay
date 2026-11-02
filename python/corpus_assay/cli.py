@@ -374,8 +374,24 @@ class ScanOptions(NamedTuple):
     command gets it.
     """
 
-    text_key: str = typer.Option(
-        "text", help="Field name containing document text (default: text)."
+    text_key: list[str] | None = typer.Option(
+        None,
+        "--text-key",
+        help=(
+            "Column containing document text. Repeat to scan several columns "
+            "(e.g. --text-key prompt --text-key chosen --text-key rejected); each "
+            "is scanned as its own document. Default: text (none when "
+            "--messages-key is given)."
+        ),
+        show_default=False,
+    )
+    messages_key: str | None = typer.Option(
+        None,
+        "--messages-key",
+        help=(
+            "Chat column holding a list of {role, content} messages; each turn is "
+            "scanned as its own document and records carry its role and turn index."
+        ),
     )
     id_key: str | None = typer.Option(
         None, help="Optional stable doc id field (otherwise hashed from text)."
@@ -508,7 +524,8 @@ def _scan_config_from_options(
     resolved_spaced = _resolve_spaced(cfg, spaced_path=opts.spaced_seeds)
     scan_cfg = ScanConfig(
         inputs=inputs,
-        text_key=opts.text_key,
+        text_keys=opts.text_key or [],
+        messages_key=opts.messages_key,
         id_key=opts.id_key,
         index_path=index_path,
         ngram=cfg.ngram,

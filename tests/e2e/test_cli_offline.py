@@ -399,3 +399,78 @@ def test_build_index_warns_about_hidden_labels(
         proc.stdout
     )
     assert out.exists()
+
+
+def _records(out_dir: Path) -> list[dict]:
+    lines = [
+        line
+        for path in sorted((out_dir / "contaminated_docs").glob("*.ndjson"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    return sorted((json.loads(line) for line in lines), key=lambda r: r["doc_id"])
+
+
+def test_scan_preference_and_chat_fields(
+    tmp_path: Path, config: Path, index: Path, env: dict[str, str]
+) -> None:
+    leak = f"{ITEMS[0]['question']} {ITEMS[0]['answer']}"
+    shards = tmp_path / "shards"
+    shards.mkdir()
+    pq.write_table(
+        pa.table(
+            {
+                "id": [1, 2, 3],
+                "prompt": [FILLER, leak, FILLER],
+                "chosen": [leak, FILLER, FILLER],
+                "rejected": [FILLER, FILLER, f"{FILLER} {leak}"],
+                "source": ["a", "b", "c"],
+            }
+        ),
+        shards / "pref.parquet",
+    )
+    chat = [
+        {"id": "c1", "messages": [
+            {"role": "user", "content": FILLER},
+            {"role": "assistant", "content": f"{FILLER}<|endoftext|>{leak}"},
+        ]},
+        {"id": "c2", "messages": [{"role": "user", "content": FILLER}]},
+    ]  # fmt: skip
+    (shards / "chat.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in chat), encoding="utf-8"
+    )
+    common = [
+        "--index", str(index), "--config", str(config), "--id-key", "id",
+        "--workers", "1", "--all-records",
+    ]  # fmt: skip
+
+    pref_out = tmp_path / "pref_out"
+    proc = _cli(
+        "scan", "--input", str(shards / "pref.parquet"), "--out-dir", str(pref_out),
+        "--text-key", "prompt", "--text-key", "chosen", "--text-key", "rejected",
+        *common, env=env,
+    )  # fmt: skip
+    assert "not scanning string column(s) source" in proc.stderr
+    assert [(r["doc_id"], r["field"]) for r in _records(pref_out)] == [
+        ("1/chosen-part-0", "chosen"),
+        ("2/prompt-part-0", "prompt"),
+        ("3/rejected-part-0", "rejected"),
+    ]
+    manifest = json.loads((pref_out / "_RUN_MANIFEST.json").read_text("utf-8"))
+    assert manifest["scan_config"]["text_keys"] == ["prompt", "chosen", "rejected"]
+
+    for no_split, expected_id in [
+        (False, "c1/messages/1-part-1"),
+        (True, "c1/messages/1"),
+    ]:
+        chat_out = tmp_path / f"chat_out_{no_split}"
+        _cli(
+            "scan", "--input", str(shards / "chat.jsonl"), "--out-dir", str(chat_out),
+            "--messages-key", "messages", *(["--no-split"] if no_split else []),
+            *common, env=env,
+        )  # fmt: skip
+        records = _records(chat_out)
+        assert [(r["doc_id"], r["field"], r["role"], r["turn"]) for r in records] == [
+            (expected_id, "messages", "assistant", 1)
+        ]
+        _cli("inspect-run", "--scan-dir", str(chat_out), env=env)
+        _cli("report", "--scan-dir", str(chat_out), env=env)

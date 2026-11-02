@@ -27,6 +27,16 @@ All notable changes to this project are documented here. The format follows
   `commonsenseqa`, `arc_challenge`, `arc_easy`, `piqa`. Each entry carries metadata: the
   split harnesses score, whether the dataset is gated, the share of items with fewer than
   3 13-grams, and notes. `describe-benchmark` prints it after the spec, as YAML comments.
+- Several text fields and chat messages per record. `--text-key` is repeatable
+  (`--text-key prompt --text-key chosen --text-key rejected`), and `--messages-key`
+  scans a `list<struct{role, content}>` chat column. Each field, and each chat turn,
+  is scanned as its own document (packed splitting then applies within it), and the
+  records say where the match is: `field`, plus `role` and `turn` for chat turns.
+  This works for Parquet and JSONL; the JSONL conversion keeps every requested column.
+- A warning, once per shard, names the string columns (and chat-like columns) that
+  the scan does not read, and a missing `--id-key` column.
+- `large_string`, string-view and string-dictionary text columns are read; they used to
+  be rejected.
 - `--all-records` on `scan`, `run` and `run-hf` writes every flagged record to
   `contaminated_docs/` (same as `--max-return-records 0`).
 - `--no-split` on `scan`, `run` and `run-hf` turns off packed-document splitting
@@ -56,6 +66,24 @@ All notable changes to this project are documented here. The format follows
   - `lambada`: the `default` config, named explicitly.
 - Every registry entry is pinned to a Hub commit, so configs written by `init-config`
   pass the revision-pin check without `--allow-unpinned`.
+- **Record schema v3.** `contaminated_docs/*.ndjson` records now have
+  `schema_version: 3` and an optional `field` (always written by this version), `role`
+  and `turn`. v2 records still parse (`DocResult`, `parse_contamination_record`,
+  `inspect-run`). `DOC_RESULT_SCHEMA_VERSION` is 3.
+- **Doc ids of multi-field scans.** With several `--text-key`s or a `--messages-key`,
+  doc ids name the field: `<id>/<field>-part-<k>`, or `<id>/<field>/<turn>-part-<k>`
+  for a chat turn. A scan of one text key keeps `<id>-part-<k>`.
+- Non-string id columns (integers and so on) are cast to strings in Parquet input too,
+  instead of being silently ignored in favour of text hashes; an id column that cannot
+  be cast is an error.
+- `ScanConfig` takes `text_keys: list[str]` and `messages_key`; the old
+  `text_key="..."` argument (and old manifests' `config.text_key`) is still accepted.
+  The run manifest's `scan_config` records `text_keys` and `messages_key`.
+  `scan_stream_rust` accepts a list for `text_key` and a `messages_key` argument.
+- The resume fingerprint covers the new config fields, so shards scanned by an
+  earlier version are re-scanned.
+- The order of the options in `scan`/`run`/`run-hf --help` changed slightly: the
+  shared scan options are defined once and listed together.
 
 ### Fixed
 

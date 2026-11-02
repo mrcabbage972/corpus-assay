@@ -137,7 +137,9 @@ def write_run_outputs(layout: OutputLayout, run: RunSummary, cfg: ScanConfig) ->
                 meta_sha256=_file_sha256(meta_path),
             ),
             scan_config=RunScanConfig(
-                text_key=cfg.text_key,
+                text_key=cfg.text_keys[0] if cfg.text_keys else None,
+                text_keys=list(cfg.text_keys),
+                messages_key=cfg.messages_key,
                 id_key=cfg.id_key,
                 n=cfg.ngram,
                 min_hits=cfg.min_hits,

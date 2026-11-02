@@ -65,7 +65,16 @@ class DecontaminationConfig(BaseModel):
 
 class ScanConfig(BaseModel):
     inputs: list[str]
-    text_key: str
+    # Text columns to scan; each is scanned as its own sub-document(s).
+    # Default: ["text"], or none when `messages_key` is set.
+    text_keys: list[str] = Field(default_factory=list)
+    # The single text column of 0.1 configs. Still accepted as input (a name or
+    # a list) and folded into `text_keys`; afterwards it reads back the first
+    # text key. Not serialized: dumps carry `text_keys` only.
+    text_key: str | None = Field(default=None, exclude=True)
+    # Optional chat column, a list of ``{role, content}`` structs; each turn is
+    # scanned as its own sub-document(s).
+    messages_key: str | None = None
     id_key: str | None
     index_path: str  # Path to .native file
     out_dir: str
@@ -118,6 +127,35 @@ class ScanConfig(BaseModel):
         if mode not in {"auto", "memory", "mmap"}:
             raise ValueError("index_backend must be one of: auto, memory, mmap")
         return mode
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_text_key(cls, data: Any) -> Any:
+        if not isinstance(data, dict) or "text_key" not in data:
+            return data
+        data = dict(data)
+        legacy = data.pop("text_key")
+        if legacy is None:
+            return data
+        keys = [legacy] if isinstance(legacy, str) else list(legacy)
+        given = list(data.get("text_keys") or [])
+        if given and keys not in (given, given[:1]):
+            raise ValueError("text_key and text_keys disagree; pass text_keys only")
+        data["text_keys"] = given or keys
+        return data
+
+    @model_validator(mode="after")
+    def _validate_text_keys(self) -> "ScanConfig":
+        if not self.text_keys and self.messages_key is None:
+            # Neither given: the historical default column.
+            self.text_keys = ["text"]
+        keys = [*self.text_keys, *([self.messages_key] if self.messages_key else [])]
+        if any(not key for key in keys) or len(set(keys)) != len(keys):
+            raise ValueError(
+                "text_keys and messages_key must be non-empty and distinct"
+            )
+        self.text_key = self.text_keys[0] if self.text_keys else None
+        return self
 
     @field_validator("max_return_records")
     @classmethod

@@ -131,6 +131,19 @@ corpus-assay scan --config config.yaml --index bench.native \
   --input "data/**/*.parquet" --id-key id --out-dir scan_out
 ```
 
+Records with several texts can be scanned field by field. Each text, and each chat turn,
+is scanned as its own document, and the records say which field (and role and turn) it
+was:
+
+```bash
+# Preference data: prompt and both answers
+corpus-assay scan ... --text-key prompt --text-key chosen --text-key rejected
+# Chat data: a `messages` column of {role, content} turns
+corpus-assay scan ... --messages-key messages --no-split
+```
+
+A shard's string columns that are not scanned are reported in a warning.
+
 **4. Report.**
 
 ```bash
@@ -149,7 +162,7 @@ default this is a sample of the first 500 flagged per shard; pass `--all-records
 every one:
 
 ```json
-{"doc_id": "doc500-part-0", "match_count": 85, "src_hits": [[0, 85]],
+{"doc_id": "doc500-part-0", "field": "text", "match_count": 85, "src_hits": [[0, 85]],
  "item_hits": [{"item_id": 7, "hits": 85, "longest_run_tokens": 75, "unique_hits": 85, ...}]}
 ```
 
@@ -273,7 +286,7 @@ if __name__ == "__main__":  # required: scan workers are spawned processes
     )
     scan_cfg = ScanConfig(
         inputs=["data/"],
-        text_key="text",
+        text_keys=["text"],  # several columns: ["prompt", "chosen", "rejected"]
         id_key="id",
         index_path="bench.native",
         out_dir="scan_out",
@@ -292,12 +305,13 @@ if __name__ == "__main__":  # required: scan workers are spawned processes
 
 - At most 64 benchmarks per index, because attribution is stored as a 64-bit mask. Use
   several indexes for more.
-- The text column must be a plain UTF-8 string column. Parquet `large_string` columns are
-  rejected; cast them first.
+- Text columns must be string columns (`string`, `large_string`, string view or string
+  dictionary); chat columns must be lists of `{role, content}` structs.
 - JSONL shards are loaded fully into memory and converted to Parquet before scanning.
   Use Parquet for very large shards.
 - Documents are split on `<|endoftext|>`, and each part is scored separately. Records are
-  named `<id>-part-<k>`. Pass `--no-split` to score each record whole.
+  named `<id>-part-<k>` (`<id>/<field>[/<turn>]-part-<k>` when several fields or a
+  messages column are scanned). Pass `--no-split` to score each text whole.
 - Only verbatim overlap is detected; see [above](#what-it-detects-and-what-it-doesnt).
 
 ## Documentation

@@ -781,3 +781,53 @@ def test_scan_no_split_flag(
     scan_cfg = patch_scan_pipeline["do_scan"][0]
     assert scan_cfg.packed_doc_sep == expected
     assert (scan_cfg.packed_doc_sep_typo is None) == (expected is None)
+
+
+@pytest.mark.parametrize(
+    ("flags", "text_keys", "messages_key"),
+    [
+        ([], ["text"], None),
+        (["--text-key", "body"], ["body"], None),
+        (
+            ["--text-key", "prompt", "--text-key", "chosen", "--text-key", "rejected"],
+            ["prompt", "chosen", "rejected"],
+            None,
+        ),
+        (["--messages-key", "messages"], [], "messages"),
+        (
+            ["--text-key", "system", "--messages-key", "messages"],
+            ["system"],
+            "messages",
+        ),
+    ],
+)
+def test_scan_text_and_messages_keys(
+    tmp_path: Path,
+    tmp_cfg_file: Path,
+    patch_config_loader: None,
+    patch_scan_pipeline: dict[str, Any],
+    flags: list[str],
+    text_keys: list[str],
+    messages_key: str | None,
+) -> None:
+    idx = tmp_path / "idx.native"
+    idx.write_text("x", encoding="utf-8")
+    result = runner.invoke(
+        cli.app,
+        [
+            "scan",
+            "--input",
+            str(tmp_path / "*.parquet"),
+            "--index",
+            str(idx),
+            "--out-dir",
+            str(tmp_path / "out"),
+            "--config",
+            str(tmp_cfg_file),
+            *flags,
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    scan_cfg = patch_scan_pipeline["do_scan"][0]
+    assert scan_cfg.text_keys == text_keys
+    assert scan_cfg.messages_key == messages_key

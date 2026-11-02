@@ -6,7 +6,7 @@ __version__: str
 
 def scan_stream_rust(
     input: IO[bytes],
-    text_key: str,
+    text_key: str | list[str],
     id_key: str | None,
     index_path: str,
     n: int,
@@ -25,8 +25,16 @@ def scan_stream_rust(
     spaced_ver_min_span: int = 17,
     spaced_ver_identity: float = 0.85,
     boilerplate_threshold: int = 50,
+    messages_key: str | None = None,
 ) -> tuple[int, int, list[str], int]:
-    """Scan a Parquet stream; returns ``(scanned, contaminated, records, empty)``."""
+    """Scan a Parquet stream; returns ``(scanned, contaminated, records, empty)``.
+
+    ``text_key`` is one text column or a list of them; ``messages_key`` names an
+    optional ``list<struct{role, content}>`` chat column. Each text, and each chat
+    turn, is scanned as its own sub-document(s). ``packed_doc_sep=None`` turns
+    packed-document splitting off; ``max_return_records`` of ``None`` or ``0``
+    returns every flagged record.
+    """
 
 def set_ngram_config_path(path: str) -> None: ...
 def normalize_text(s: str) -> list[str]: ...
