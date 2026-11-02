@@ -8,7 +8,7 @@ from typing import Any, Callable, Protocol
 import typer
 
 from corpus_assay.benchmark_spec import BenchmarkSpec
-from corpus_assay.benchmarks import BenchmarkLoader
+from corpus_assay.benchmarks import BenchmarkLoader, hidden_label_warning
 from corpus_assay.config import (
     DecontaminationConfig,
     load_decontamination_config,
@@ -26,6 +26,41 @@ class _DatasetBuilder(Protocol):
 
 
 DatasetBuilderLoader = Callable[..., _DatasetBuilder]
+
+# (spec, config_name, split) -> label values of the first rows of the split, or
+# None when the split has no such column.
+LabelProbe = Callable[[BenchmarkSpec, str | None, str], list[Any] | None]
+
+# Rows sampled per split by the default label probe.
+LABEL_PROBE_ROWS = 200
+
+
+def stream_label_sample(
+    spec: BenchmarkSpec, config_name: str | None, split: str
+) -> list[Any] | None:
+    """Stream the first rows of a split and return their ``label_field`` values."""
+    from itertools import islice
+
+    from datasets import load_dataset
+
+    assert spec.label_field is not None
+    kwargs: dict[str, Any] = {
+        "split": split,
+        "streaming": True,
+        "revision": spec.revision,
+        "data_files": spec.data_files,
+    }
+    if spec.trust_remote_code:
+        kwargs["trust_remote_code"] = True
+    if config_name is not None:
+        kwargs["name"] = config_name
+    ds = load_dataset(spec.dataset, **kwargs)
+    values: list[Any] = []
+    for row in islice(ds, LABEL_PROBE_ROWS):
+        if spec.label_field not in row:
+            return None
+        values.append(row[spec.label_field])
+    return values
 
 
 def _splits_from_data_files(data_files: object) -> set[str]:
@@ -78,6 +113,7 @@ class ConfigValidator:
         config_loader: Callable[[str | Path], DecontaminationConfig] = (
             load_decontamination_config
         ),
+        label_probe: LabelProbe = stream_label_sample,
     ) -> None:
         if dataset_builder_loader is None:
             from datasets import load_dataset_builder
@@ -88,6 +124,7 @@ class ConfigValidator:
         self._load_dataset_builder = dataset_builder_loader
         self._benchmark_loader_factory = benchmark_loader_factory
         self._config_loader = config_loader
+        self._label_probe = label_probe
 
     def validate(
         self,
@@ -167,12 +204,33 @@ class ConfigValidator:
                         f"{missing}. Available: {available}"
                     )
 
+                warnings.extend(self._check_labels(spec, config_name))
+
             if spec_ok:
                 checked += 1
             else:
                 skipped += 1
 
         return checked, skipped, warnings
+
+    def _check_labels(self, spec: BenchmarkSpec, config_name: str | None) -> list[str]:
+        """Hidden-label warnings for the indexed splits (needs ``label_field``)."""
+        if spec.label_field is None:
+            return []
+        found: list[str] = []
+        for split in spec.splits:
+            try:
+                values = self._label_probe(spec, config_name, split)
+            except Exception as exc:
+                found.append(
+                    f"[warn] {spec.name}: could not read {spec.label_field!r} from "
+                    f"split {split!r} to check for hidden labels: {exc}"
+                )
+                continue
+            warning = hidden_label_warning(spec, split, config_name, values)
+            if warning is not None:
+                found.append(f"[warn] {warning}")
+        return found
 
     def _build_dataset_builder(
         self, spec: BenchmarkSpec, config_name: str | None

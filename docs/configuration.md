@@ -2,7 +2,7 @@
 
 A config is a YAML file. `init-config` writes a starter file, and `validate-config`
 checks one (`--check-remote` also resolves configs and splits against the Hugging Face
-Hub). Unknown keys are rejected.
+Hub, and checks for hidden labels). Unknown keys are rejected.
 
 ```yaml
 benchmarks:            # required, at least one; at most 64 per index
@@ -45,6 +45,7 @@ Keys of a full spec:
 | `revision` | `null` | Hub commit hash or tag. `build-index` requires it unless `--allow-unpinned` is passed. Registry entries are pinned. |
 | `data_files` | `null` | Passed to `datasets.load_dataset`, e.g. `{test: /path/items.jsonl}`. When the dataset card lists no splits, `validate-config --check-remote` takes the split names from these keys (a string or list means `train`). |
 | `trust_remote_code` | `false` | Passed to `datasets.load_dataset`. Script-based datasets are not supported by `datasets` 4.x. |
+| `label_field` | `null` | The item's label or answer column. Never indexed; used only to check that the indexed splits have public labels (see below). |
 
 ### The built-in registry
 
@@ -114,6 +115,16 @@ any index. COPA's fields are one short sentence each, so a 13-gram index contain
 of its items, and `build-index` fails on it unless `--allow-empty-benchmarks` is
 passed. For such benchmarks, build a separate index with a smaller `ngram` (for
 example 8) and validate its false-positive rate on clean text before relying on it.
+
+### Hidden labels
+
+Several benchmarks hide their test labels (HellaSwag, BoolQ, WinoGrande, COPA,
+CommonsenseQA, PIQA among them), so harnesses score their validation split, and an
+index built from `test` protects the wrong items. When a spec sets `label_field`,
+`build-index` warns if every value of that column in an indexed split is missing, `""`
+or `-1`, and names the split harnesses score when the dataset is in the registry.
+`validate-config --check-remote` runs the same check on the first 200 rows of each
+split. Registry entries set `label_field` where the dataset has one.
 
 ## `background` and `stopgrams`
 

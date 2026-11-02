@@ -18,6 +18,10 @@ All notable changes to this project are documented here. The format follows
   table of them, and `inspect-index` prints them with the number of items the n-gram rule
   cannot flag (`--min-hits` recounts against another threshold). For older indexes,
   `inspect-index` derives the counts from `.sources.json` and `.items.meta.json`.
+- Hidden-label check (#6): a new optional spec key, `label_field`, names the label
+  column (never indexed). `build-index` and `validate-config --check-remote` warn when
+  every value of it in an indexed split is missing, `""` or `-1`, and name the split
+  harnesses score when the dataset is in the registry.
 - Registry entries (#14): `aime24`, `aime25`, `amc23`, `math500`, `gsm8k_solutions`,
   `jeebench`, `gpqa_diamond`, `humaneval`, `mbpp`, `livecodebench`, `ifeval`,
   `commonsenseqa`, `arc_challenge`, `arc_easy`, `piqa`. Each entry carries metadata: the

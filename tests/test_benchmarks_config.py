@@ -343,6 +343,87 @@ def test_benchmark_loader_wildcard_resolution_failure_warns(monkeypatch) -> None
     assert "RuntimeError: nope" in failure
 
 
+def test_benchmark_loader_hidden_labels_warn_with_scored_split(
+    monkeypatch, caplog
+) -> None:
+    # A registry dataset indexed on its test split, whose labels are all "".
+    spec = BenchmarkSpec(
+        name="HellaSwag",
+        dataset="Rowan/hellaswag",
+        splits=["test"],
+        fields=["ctx"],
+        label_field="label",
+    )
+
+    def fake_load_dataset(*_args, **_kwargs):
+        return {"test": [{"ctx": "a", "label": ""}, {"ctx": "b", "label": ""}]}
+
+    monkeypatch.setattr(utils, "load_dataset", fake_load_dataset)
+
+    loader = BenchmarkLoader(spec)
+    with caplog.at_level("WARNING"):
+        assert list(loader.load_positive()) == ["a", "b"]
+    (warning,) = loader.load_status.warnings
+    assert "every 'label' value in split 'test'" in warning
+    # Names the split harnesses score, from the registry metadata.
+    assert "Harnesses score the 'validation' split of Rowan/hellaswag" in warning
+    assert "labels look hidden" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("labels", "hidden"),
+    [
+        ([-1, -1], True),
+        ([None, ""], True),
+        (["-1", " "], True),
+        ([0, -1], False),
+        (["A", ""], False),
+        ([False, False], False),
+    ],
+)
+def test_benchmark_loader_hidden_label_values(monkeypatch, labels, hidden) -> None:
+    spec = BenchmarkSpec(
+        name="Local",
+        dataset="json",
+        data_files={"test": "items.jsonl"},
+        splits=["test"],
+        fields=["q"],
+        label_field="label",
+    )
+    rows = [{"q": f"q{i}", "label": v} for i, v in enumerate(labels)]
+    monkeypatch.setattr(utils, "load_dataset", lambda *_a, **_k: rows)
+
+    loader = BenchmarkLoader(spec)
+    list(loader.load_positive())
+    assert bool(loader.load_status.warnings) is hidden
+    if hidden:
+        # Not a registry dataset: a generic hint instead of a named split.
+        assert "often 'validation'" in loader.load_status.warnings[0]
+
+
+def test_benchmark_loader_missing_label_column_warns(monkeypatch) -> None:
+    spec = BenchmarkSpec(
+        name="Local",
+        dataset="json",
+        splits=["test"],
+        fields=["q"],
+        label_field="answer",
+    )
+    monkeypatch.setattr(utils, "load_dataset", lambda *_a, **_k: [{"q": "x"}])
+
+    loader = BenchmarkLoader(spec)
+    list(loader.load_positive())
+    (warning,) = loader.load_status.warnings
+    assert "label_field 'answer' is not a column" in warning
+
+
+def test_label_field_must_be_non_empty() -> None:
+    with pytest.raises(ValueError, match="label_field"):
+        BenchmarkSpec(
+            name="X", dataset="d", splits=["test"], fields=["q"], label_field=" "
+        )
+
+
 def test_explicit_all_is_not_auto_dropped(monkeypatch):
     spec = BenchmarkSpec(
         name="ExplicitAll",

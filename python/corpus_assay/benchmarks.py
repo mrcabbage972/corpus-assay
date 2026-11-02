@@ -1,9 +1,10 @@
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 from datasets import get_dataset_config_names
 
+from corpus_assay.benchmark_registry import REGISTRY
 from corpus_assay.benchmark_spec import BenchmarkSpec
 from corpus_assay.constants import FIELD_SEPARATOR
 from corpus_assay.utils import _load_dataset_optional_revision
@@ -91,6 +92,80 @@ def _concat_fields(obj: Any, keys: list[str]) -> str:
     return f" {FIELD_SEPARATOR} ".join(chunks)
 
 
+def is_missing_label(value: Any) -> bool:
+    """Whether a label value is a placeholder: None, empty, or -1."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip() in ("", "-1")
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return value == -1
+    return False
+
+
+def hidden_label_warning(
+    spec: BenchmarkSpec,
+    split: str,
+    config_name: str | None,
+    values: Iterable[Any] | None,
+) -> str | None:
+    """A warning when ``spec.label_field`` is absent or all-placeholder in a split.
+
+    ``values`` is the label column of the split (or a sample of it); ``None`` means
+    the column does not exist. Returns None when the labels look public.
+    """
+    label = spec.label_field
+    if label is None:
+        return None
+    where = f"split {split!r}" + (
+        f" (config={config_name!r})" if config_name is not None else ""
+    )
+    if values is None:
+        return (
+            f"{spec.name}: label_field {label!r} is not a column of {where}; "
+            "cannot check whether its labels are public."
+        )
+    values = list(values)
+    if not values or not all(is_missing_label(v) for v in values):
+        return None
+
+    message = (
+        f"{spec.name}: every {label!r} value in {where} is missing, empty or -1. "
+        "The split's labels look hidden, and evaluation harnesses usually do not "
+        "score such a split, so the index may protect the wrong items."
+    )
+    entry = REGISTRY.entry_for_spec(spec)
+    scored = entry.scored_split if entry is not None else None
+    if scored and scored != split:
+        message += (
+            f" Harnesses score the {scored!r} split of {spec.dataset}; "
+            f"set splits: [{scored}]."
+        )
+    else:
+        message += (
+            " Harnesses usually score the split with public labels "
+            "(often 'validation')."
+        )
+    return message
+
+
+def _label_column(rows: Any, label: str) -> list[Any] | None:
+    """The values of column ``label`` in ``rows``, or None if it has no such column."""
+    column_names = getattr(rows, "column_names", None)
+    if isinstance(column_names, list):
+        if label not in column_names:
+            return None
+        return list(rows[label])
+    values: list[Any] = []
+    for row in rows:
+        if not isinstance(row, Mapping) or label not in row:
+            return None
+        values.append(row[label])
+    return values
+
+
 @dataclass
 class BenchmarkLoadStatus:
     """What loading a benchmark's positive splits produced, for build-time checks."""
@@ -131,7 +206,9 @@ class BenchmarkLoader:
         self.load_status = BenchmarkLoadStatus()
         if not self.spec.splits:
             return
-        yield from self._load_splits(self.spec.splits, status=self.load_status)
+        yield from self._load_splits(
+            self.spec.splits, status=self.load_status, check_labels=True
+        )
 
     def load_negative(self) -> Iterator[str]:
         """Yields texts from spec.subtraction_splits (data to subtract)."""
@@ -227,6 +304,7 @@ class BenchmarkLoader:
         target_splits: list[str],
         *,
         status: BenchmarkLoadStatus,
+        check_labels: bool = False,
     ) -> Iterator[str]:
         """Iterate resolved configs -> load dataset -> yield concatenated text for requested splits."""
         config_names = self._resolve_config_names()
@@ -281,6 +359,16 @@ class BenchmarkLoader:
                 found_any = True
                 status.loaded.append(where)
                 self._record_dataset_fingerprint(ds, rows, config_name, split)
+                if check_labels and self.spec.label_field is not None:
+                    warning = hidden_label_warning(
+                        self.spec,
+                        split,
+                        config_name,
+                        _label_column(rows, self.spec.label_field),
+                    )
+                    if warning is not None:
+                        status.warnings.append(warning)
+                        logger.warning(f"  WARNING: {warning}")
                 for row in rows:
                     status.rows += 1
                     yield _concat_fields(row, self.spec.fields)

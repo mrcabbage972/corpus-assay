@@ -272,3 +272,64 @@ def test_remote_check_uses_builder_data_files_when_spec_has_none(tmp_path) -> No
     )
     report = validator.validate(config_path, check_remote=True, allow_unpinned=True)
     assert report.remote_checked == 1
+
+
+def test_remote_check_warns_about_hidden_labels(tmp_path) -> None:
+    config_path = _write_config(
+        tmp_path,
+        {
+            "benchmarks": [
+                # A registry entry pointed at its test split: labels are hidden.
+                {"ref": "hellaswag", "splits": ["test"]},
+                {
+                    "name": "Public",
+                    "dataset": "demo/public",
+                    "splits": ["test"],
+                    "fields": ["q"],
+                    "label_field": "answer",
+                },
+                {
+                    "name": "NoLabel",
+                    "dataset": "demo/x",
+                    "splits": ["test"],
+                    "fields": ["q"],
+                },
+            ]
+        },
+    )
+    probed: list[tuple[str, str | None, str]] = []
+
+    def fake_probe(spec, config_name, split):
+        probed.append((spec.name, config_name, split))
+        return ["", ""] if spec.name == "HellaSwag" else ["A", "B"]
+
+    validator = ConfigValidator(
+        dataset_builder_loader=lambda *_a, **_k: _FakeBuilder({"test": object()}),
+        benchmark_loader_factory=_SingleConfigBenchmarkLoader,
+        label_probe=fake_probe,
+    )
+    report = validator.validate(config_path, check_remote=True, allow_unpinned=True)
+
+    # Only specs with a label_field are probed.
+    assert probed == [("HellaSwag", None, "test"), ("Public", None, "test")]
+    (warning,) = report.warnings
+    assert warning.startswith("[warn] HellaSwag: every 'label' value in split 'test'")
+    assert "Harnesses score the 'validation' split of Rowan/hellaswag" in warning
+    assert (report.remote_checked, report.remote_skipped) == (3, 0)
+
+
+def test_remote_check_label_probe_failure_is_a_warning(tmp_path) -> None:
+    config_path = _one_benchmark(tmp_path, splits=["test"], label_field="answer")
+
+    def failing_probe(*_args):
+        raise RuntimeError("no streaming")
+
+    validator = ConfigValidator(
+        dataset_builder_loader=lambda *_a, **_k: _FakeBuilder({"test": object()}),
+        benchmark_loader_factory=_SingleConfigBenchmarkLoader,
+        label_probe=failing_probe,
+    )
+    report = validator.validate(config_path, check_remote=True, allow_unpinned=True)
+    (warning,) = report.warnings
+    assert "could not read 'answer'" in warning and "no streaming" in warning
+    assert report.remote_checked == 1

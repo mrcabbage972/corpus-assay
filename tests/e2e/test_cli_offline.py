@@ -367,3 +367,35 @@ def test_inspect_index_lists_benchmark_counts(
     assert row[1] == "3" and int(row[2].replace(",", "")) > 0
     assert row[3:] == ["0", "0"]
     assert "unflaggable items: 0 with 0 n-grams" in proc.stdout
+
+
+def test_build_index_warns_about_hidden_labels(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    items = tmp_path / "hidden.jsonl"
+    rows = [{"question": f"{ITEMS[i]['question']}", "label": -1} for i in range(2)]
+    items.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    cfg = _benchmark_config(
+        tmp_path,
+        "hidden",
+        [
+            {
+                "name": "Hidden",
+                "dataset": "json",
+                "data_files": {"test": items.as_posix()},
+                "splits": ["test"],
+                "fields": ["question"],
+                "label_field": "label",
+            }
+        ],
+    )
+    out = tmp_path / "index.native"
+    proc = _cli(
+        "build-index", "--config", str(cfg), "--out-index", str(out),
+        "--allow-unpinned",
+        env=env,
+    )  # fmt: skip
+    assert "every 'label' value in split 'test' is missing, empty or -1" in (
+        proc.stdout
+    )
+    assert out.exists()
