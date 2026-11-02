@@ -772,7 +772,11 @@ pub fn scan_stream_rust(
         spaced_ver_identity,
     )?;
 
-    let limits = ScanLimits { max_return_records };
+    // `None` and `Some(0)` both mean "no cap": 0 used to return no records at all,
+    // contradicting the documented "use 0 to disable".
+    let limits = ScanLimits {
+        max_return_records: max_return_records.filter(|&limit| limit > 0),
+    };
 
     let temp_file = pyfile_to_tempfile(&input)?;
     let file_processing_result = py.detach(move || scan_reader(temp_file, cfg, limits));

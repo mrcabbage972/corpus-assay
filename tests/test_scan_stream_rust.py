@@ -146,3 +146,32 @@ def test_scan_stream_rust_rejects_zero_min_hits(scan_index: dict[str, Any]) -> N
             min_hits=0,
             min_coverage=0.0,
         )
+
+
+@pytest.mark.parametrize("limit", [None, 0])
+def test_scan_stream_rust_uncapped_returns_every_record(
+    tmp_path: Path, scan_index: dict[str, Any], limit: int | None
+) -> None:
+    """``None`` and ``0`` both remove the cap (0 used to return no records)."""
+    n_docs = 7
+    parquet_data = _parquet_bytes(
+        [scan_index["text"]] * n_docs,  # type: ignore
+        [f"doc-{i}" for i in range(n_docs)],
+    )
+
+    scanned, contaminated, results, _ = scan_stream_rust(
+        input=io.BytesIO(parquet_data),
+        text_key="text",
+        id_key="doc_id",
+        index_path=scan_index["index_path"],
+        n=scan_index["ngram"],
+        min_hits=1,
+        min_coverage=0.0,
+        out_hits_path=str(tmp_path / "hits.bin"),
+        max_return_records=limit,
+    )
+
+    assert scanned == contaminated == n_docs
+    assert sorted(json.loads(r)["doc_id"] for r in results) == sorted(
+        f"doc-{i}-part-0" for i in range(n_docs)
+    )

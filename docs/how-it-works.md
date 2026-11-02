@@ -83,9 +83,11 @@ Each shard is processed by one worker process, in this order:
    - Spaced seeds (experimental, opt-in): when the exact gate does not fire, the
      spaced-seed verifier can still flag the document. See
      [experimental-spaced-seeds.md](experimental-spaced-seeds.md).
-6. For flagged documents, a sample record is emitted (up to `--max-return-records` per
-   shard, default 500). It carries per-benchmark hit counts and, when the index has item
-   postings, per-item evidence. Each item's hits are split into:
+6. For flagged documents, a record is emitted. By default this is a sample: the first
+   `--max-return-records` flagged sub-documents per shard (default 500); `--all-records`
+   or `--max-return-records 0` emits every one. It carries per-benchmark hit counts
+   and, when the index has item postings, per-item evidence. Each item's hits are
+   split into:
    - **unique**: the n-gram belongs to just this item;
    - **shared**: it belongs to a few items;
    - **boilerplate**: it belongs to `>= --boilerplate-threshold` items (default 50).

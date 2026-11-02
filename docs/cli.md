@@ -245,7 +245,8 @@ $ corpus-assay scan [OPTIONS]
 * `--gate-mode <str>`: Contamination gate. &#x27;union&#x27; (default) flags a document when its matches across the whole index clear min_hits/min_coverage, with per-item attribution when an .items sidecar is present. &#x27;item&#x27; is stricter: a single protected item must clear them on its own (needs the .items sidecar). &#x27;auto&#x27; is an alias for &#x27;union&#x27;.  [default: union]
 * `--min-longest-run <int>`: With --gate-mode item, also require a contiguous run of &gt;= this many normalized tokens shared with the matching item (0 disables).  [default: 0]
 * `--boilerplate-threshold <int>`: Item fan-out at/above which a matched n-gram is counted as boilerplate in the per-item attribution split (unique/shared/boilerplate); must be &gt;= 2.  [default: 50]
-* `--max-return-records <int>`: Max contaminated document records to return per shard (sample only; use 0 to disable).  [default: 500]
+* `--max-return-records <int range>`: Max flagged sub-document records written per shard to contaminated_docs/: a sample (the first N flagged, in scan order). Use 0 (or --all-records) to write every flagged record. The per-shard counts and hits.bin are always exhaustive.  [default: 500; x&gt;=0]
+* `--all-records`: Write every flagged record to contaminated_docs/ (no cap; same as --max-return-records 0).
 * `--stopgrams <str>`: Path to stop-grams native file (optional).
 * `--allow-unverified-stopgrams`: Allow stop-grams without a compatible meta file.
 * `--spaced-seeds <str>`: [Experimental] Path to a .spaced index for the spaced-seed recall channel.
@@ -279,7 +280,8 @@ $ corpus-assay run-hf [OPTIONS]
 * `--gate-mode <str>`: Contamination gate. &#x27;union&#x27; (default) flags a document when its matches across the whole index clear min_hits/min_coverage, with per-item attribution when an .items sidecar is present. &#x27;item&#x27; is stricter: a single protected item must clear them on its own (needs the .items sidecar). &#x27;auto&#x27; is an alias for &#x27;union&#x27;.  [default: union]
 * `--min-longest-run <int>`: With --gate-mode item, also require a contiguous run of &gt;= this many normalized tokens shared with the matching item (0 disables).  [default: 0]
 * `--boilerplate-threshold <int>`: Item fan-out at/above which a matched n-gram is counted as boilerplate in the per-item attribution split (unique/shared/boilerplate); must be &gt;= 2.  [default: 50]
-* `--max-return-records <int>`: Max contaminated document records to return per shard (sample only; use 0 to disable).  [default: 500]
+* `--max-return-records <int range>`: Max flagged sub-document records written per shard to contaminated_docs/: a sample (the first N flagged, in scan order). Use 0 (or --all-records) to write every flagged record. The per-shard counts and hits.bin are always exhaustive.  [default: 500; x&gt;=0]
+* `--all-records`: Write every flagged record to contaminated_docs/ (no cap; same as --max-return-records 0).
 * `--stopgrams <str>`: Path to stop-grams native file (optional).
 * `--allow-unverified-stopgrams`: Allow stop-grams without a compatible meta file.
 * `--spaced-seeds <str>`: [Experimental] Path to a .spaced index for the spaced-seed recall channel.
@@ -316,7 +318,8 @@ $ corpus-assay run [OPTIONS]
 * `--gate-mode <str>`: Contamination gate. &#x27;union&#x27; (default) flags a document when its matches across the whole index clear min_hits/min_coverage, with per-item attribution when an .items sidecar is present. &#x27;item&#x27; is stricter: a single protected item must clear them on its own (needs the .items sidecar). &#x27;auto&#x27; is an alias for &#x27;union&#x27;.  [default: union]
 * `--min-longest-run <int>`: With --gate-mode item, also require a contiguous run of &gt;= this many normalized tokens shared with the matching item (0 disables).  [default: 0]
 * `--boilerplate-threshold <int>`: Item fan-out at/above which a matched n-gram is counted as boilerplate in the per-item attribution split (unique/shared/boilerplate); must be &gt;= 2.  [default: 50]
-* `--max-return-records <int>`: Max contaminated document records to return per shard (sample only; use 0 to disable).  [default: 500]
+* `--max-return-records <int range>`: Max flagged sub-document records written per shard to contaminated_docs/: a sample (the first N flagged, in scan order). Use 0 (or --all-records) to write every flagged record. The per-shard counts and hits.bin are always exhaustive.  [default: 500; x&gt;=0]
+* `--all-records`: Write every flagged record to contaminated_docs/ (no cap; same as --max-return-records 0).
 * `--stopgrams <str>`: Path to stop-grams native file (optional).
 * `--allow-unverified-stopgrams`: Allow stop-grams without a compatible meta file.
 * `--spaced-seeds <str>`: [Experimental] Path to a .spaced index for the spaced-seed recall channel.

@@ -27,6 +27,8 @@ All notable changes to this project are documented here. The format follows
   `commonsenseqa`, `arc_challenge`, `arc_easy`, `piqa`. Each entry carries metadata: the
   split harnesses score, whether the dataset is gated, the share of items with fewer than
   3 13-grams, and notes. `describe-benchmark` prints it after the spec, as YAML comments.
+- `--all-records` on `scan`, `run` and `run-hf` writes every flagged record to
+  `contaminated_docs/` (same as `--max-return-records 0`).
 
 ### Changed
 
@@ -55,10 +57,15 @@ All notable changes to this project are documented here. The format follows
   naming registry keys reused an index built from the old registry entries after the
   registry changed. The key now also hashes the resolved benchmark specs. Existing
   cached indexes are rebuilt once.
-
 - `validate-config --check-remote` rejected datasets whose card lists no splits even
   though their `data_files` load (for example `opencompass/AIME2025`: "splits not found
   ... Available: []"). It now takes the split names from the `data_files` keys.
+- `--max-return-records 0` now removes the cap, as its help text said; it used to
+  return no records at all. `ScanConfig(max_return_records=0)` and the Rust scanner
+  treat 0 as no cap too, and the docs now say that the default output is a sample of
+  the first N flagged sub-documents per shard (`hits.bin` is always exhaustive).
+- No empty `contaminated_docs/<shard>.decontam.sample.ndjson` is written for a shard
+  with no records, and a stale one from an earlier run of the shard is removed.
 
 ## [0.1.0] - 2026-10-03
 

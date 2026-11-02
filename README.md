@@ -144,8 +144,9 @@ Top leaking shards:
   shard-0: 85 unique hashes (85.00/1k docs)
 ```
 
-Each flagged document is written as a sample record to
-`scan_out/contaminated_docs/*.ndjson`:
+Flagged documents are written as records to `scan_out/contaminated_docs/*.ndjson`. By
+default this is a sample of the first 500 flagged per shard; pass `--all-records` to get
+every one:
 
 ```json
 {"doc_id": "doc500-part-0", "match_count": 85, "src_hits": [[0, 85]],
@@ -205,7 +206,7 @@ scan_out/
 ├── _RUN_MANIFEST.json              # full scan config, input hashes, tool versions
 ├── summaries/<shard>.summary.json  # per-shard counts (also the resume cache)
 ├── per_source_hits/<shard>.hits.bin
-├── contaminated_docs/<shard>.decontam.sample.ndjson   # up to 500 records per shard
+├── contaminated_docs/<shard>.decontam.sample.ndjson   # first 500 flagged per shard (--all-records: every one)
 └── report/                         # written by `report`
     ├── report.md / report.json
     ├── leak_by_benchmark.csv / .json

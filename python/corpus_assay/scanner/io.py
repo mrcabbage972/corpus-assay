@@ -72,13 +72,21 @@ def maybe_write_contaminated_docs(
     path: Path, contaminated: int, json_results: Iterable[str]
 ) -> None:
     """
-    Write a sampled NDJSON file of contaminated docs (json_results is capped upstream).
+    Write the NDJSON records of flagged docs for one shard.
+
+    ``json_results`` is capped upstream by ``max_return_records`` (a sample of the
+    first N flagged sub-documents, or every one when uncapped). No file is
+    written when there are no records, and a stale file from an earlier run of
+    the same shard is removed so the directory never shows records the current
+    run did not return.
     """
-    if contaminated <= 0:
+    lines = list(json_results) if contaminated > 0 else []
+    if not lines:
+        path.unlink(missing_ok=True)
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
-        for line in json_results:
+        for line in lines:
             f.write(line)
             f.write("\n")
 

@@ -200,5 +200,6 @@ passed. `run`/`run-hf` also key their index cache on that hash.
 | `--gate-mode` | `union` | `union` or `item` (see [how-it-works.md](how-it-works.md)). |
 | `--min-longest-run` | `0` | Item gate only: also require a contiguous shared run of N tokens. |
 | `--boilerplate-threshold` | `50` | Item fan-out at which a matched n-gram counts as boilerplate in attribution. |
-| `--max-return-records` | `500` | Sample records written per shard (`0` disables). |
+| `--max-return-records` | `500` | Flagged records written per shard: a sample of the first N flagged. `0` removes the cap. |
+| `--all-records` | off | Write every flagged record (same as `--max-return-records 0`). |
 | `--dry-run` | off | Print what would be scanned and exit. |

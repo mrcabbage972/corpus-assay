@@ -709,3 +709,41 @@ def test_scanning_commands_share_scan_options() -> None:
         command = group.commands[name]  # type: ignore[attr-defined]
         params = {param.name for param in command.params}
         assert shared <= params, (name, shared - params)
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        ([], 500),
+        (["--max-return-records", "10"], 10),
+        (["--max-return-records", "0"], None),
+        (["--all-records"], None),
+    ],
+)
+def test_scan_record_cap_flags(
+    tmp_path: Path,
+    tmp_cfg_file: Path,
+    patch_config_loader: None,
+    patch_scan_pipeline: dict[str, Any],
+    flags: list[str],
+    expected: int | None,
+) -> None:
+    idx = tmp_path / "idx.native"
+    idx.write_text("x", encoding="utf-8")
+    result = runner.invoke(
+        cli.app,
+        [
+            "scan",
+            "--input",
+            str(tmp_path / "*.parquet"),
+            "--index",
+            str(idx),
+            "--out-dir",
+            str(tmp_path / "out"),
+            "--config",
+            str(tmp_cfg_file),
+            *flags,
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert patch_scan_pipeline["do_scan"][0].max_return_records == expected

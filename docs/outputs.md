@@ -86,7 +86,12 @@ normalization hashes.
   `<u64 hash, u64 mask>` for **every** distinct matched hash in the shard. `report`
   aggregates these files.
 - **`contaminated_docs/<shard>.decontam.sample.ndjson`** holds one JSON object per
-  flagged sub-document, capped at `--max-return-records`:
+  flagged sub-document. **By default this is a sample:** the first
+  `--max-return-records` (500) flagged sub-documents of each shard, in scan order.
+  Pass `--max-return-records 0` or `--all-records` to write every flagged record (for
+  an audit, or to remove the flagged documents). No file is written for a shard with no
+  records. The counts in the summaries and the `hits.bin` files are exhaustive
+  either way.
 
   ```json
   {"schema_version": 2, "doc_id": "doc500-part-0", "match_count": 85,

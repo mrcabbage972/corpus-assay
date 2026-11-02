@@ -73,6 +73,10 @@ class ScanConfig(BaseModel):
     index_backend: str = "auto"
     packed_doc_sep: str = "<|endoftext|>"
     packed_doc_sep_typo: str | None = "<|endoftext}>"
+    # Cap on the flagged sub-document records returned per shard (the
+    # `contaminated_docs/` sample: the first N flagged, in scan order). `None` (or
+    # 0, normalized to `None`) returns every flagged record; hits.bin is always
+    # exhaustive regardless.
     max_return_records: int | None = 500
     target_hf_dataset: str | None = None
     target_hf_split: str | None = None
@@ -108,6 +112,15 @@ class ScanConfig(BaseModel):
         if mode not in {"auto", "memory", "mmap"}:
             raise ValueError("index_backend must be one of: auto, memory, mmap")
         return mode
+
+    @field_validator("max_return_records")
+    @classmethod
+    def _validate_max_return_records(cls, v: int | None) -> int | None:
+        if v is None:
+            return None
+        if v < 0:
+            raise ValueError("max_return_records must be >= 0 (0 means no cap)")
+        return v or None
 
     @field_validator("gate_mode")
     @classmethod

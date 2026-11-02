@@ -390,11 +390,22 @@ class ScanOptions(NamedTuple):
     gate_mode: str = typer.Option("union", help=_GATE_MODE_HELP)
     min_longest_run: int = typer.Option(0, help=_MIN_LONGEST_RUN_HELP)
     boilerplate_threshold: int = typer.Option(50, help=_BOILERPLATE_THRESHOLD_HELP)
-    max_return_records: int | None = typer.Option(
+    max_return_records: int = typer.Option(
         500,
+        min=0,
         help=(
-            "Max contaminated document records to return per shard "
-            "(sample only; use 0 to disable)."
+            "Max flagged sub-document records written per shard to "
+            "contaminated_docs/: a sample (the first N flagged, in scan order). "
+            "Use 0 (or --all-records) to write every flagged record. The per-shard "
+            "counts and hits.bin are always exhaustive."
+        ),
+    )
+    all_records: bool = typer.Option(
+        False,
+        "--all-records",
+        help=(
+            "Write every flagged record to contaminated_docs/ (no cap; same as "
+            "--max-return-records 0)."
         ),
     )
     stopgrams: str | None = typer.Option(
@@ -495,7 +506,7 @@ def _scan_config_from_options(
         out_dir=str(out_dir),
         workers=opts.workers,
         index_backend=opts.index_backend,
-        max_return_records=opts.max_return_records,
+        max_return_records=None if opts.all_records else opts.max_return_records,
         stopgrams_path=_resolve_stopgrams_path(cfg, stopgrams_path=opts.stopgrams),
         spaced_path=resolved_spaced.path,
         spaced_min_loci=resolved_spaced.min_loci,
