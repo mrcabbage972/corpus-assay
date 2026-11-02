@@ -6,6 +6,7 @@ from corpus_assay.schemas.index_meta import (
 )
 from corpus_assay.schemas.run_manifest import (
     RUN_MANIFEST_SCHEMA_VERSION,
+    RunBenchmarkInfo,
     RunHFDatasetInput,
     RunIndexInfo,
     RunInputs,
@@ -36,6 +37,7 @@ __all__ = [
     "IndexMeta",
     "RUN_MANIFEST_SCHEMA_VERSION",
     "RunStopGramsInfo",
+    "RunBenchmarkInfo",
     "RunHFDatasetInput",
     "RunIndexInfo",
     "RunInputs",

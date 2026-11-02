@@ -227,7 +227,7 @@ benchmarks:
 ```
 scan_out/
 ├── _FINAL_SUMMARY.json / .csv      # totals: docs scanned, contaminated (per channel), failed files
-├── _RUN_MANIFEST.json              # full scan config, input hashes, tool versions
+├── _RUN_MANIFEST.json              # scan config, index file and input hashes, benchmarks, tool versions
 ├── summaries/<shard>.summary.json  # per-shard counts (also the resume cache)
 ├── per_source_hits/<shard>.hits.bin
 ├── per_item_best/<shard>.json      # best single-document coverage of each item hit

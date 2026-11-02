@@ -129,6 +129,15 @@ All notable changes to this project are documented here. The format follows
   them), and `part`, the packed part's index within its field or turn (the `<k>` of
   `-part-<k>`; absent under `--no-split`), so a flagged sub-document can be located
   without parsing its doc id. Older records still parse.
+- The run manifest records what the index is and how the scan gated (#8):
+  `index` gains the SHA-256 of every index file (`native_sha256`, `attr_sha256`,
+  `sources_sha256`, `items_sha256`, `items_meta_sha256`, `items_text_sha256`,
+  `item_stopgrams_sha256`), `normalization_config_sha`, `ngram_config_hash`, the
+  indexed `benchmarks` (with requested and resolved revisions, splits and dataset
+  fingerprints) and `benchmark_stats`; `scan_config` gains `gate_mode`,
+  `min_longest_run` and `boilerplate_threshold`. All optional: older manifests
+  still load in `reproduce`, `inspect-run` and `report`. `reproduce` also checks
+  the `.native` SHA-256 when the manifest has it.
 
 ### Changed
 

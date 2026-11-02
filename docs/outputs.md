@@ -119,11 +119,26 @@ normalization hashes.
   `--spaced-seeds`). A sub-document flagged by several channels counts in each, so
   the channel counts can add up to more than `total_contaminated`. Documents are
   counted per packed sub-document (of each scanned field or chat turn).
-- **`_RUN_MANIFEST.json`** holds the full scan config (including `text_keys`,
-  `messages_key`, `packed_doc_sep`, which is `null` under `--no-split`, and
-  `exact_channel`, `exact_min_chars` and `confirm`), the index
-  paths and SHA-256s, the input file list, tool versions, and stop-gram provenance. `reproduce` reads it,
-  re-checks the recorded hashes, and re-runs the scan.
+- **`_RUN_MANIFEST.json`** describes the run:
+  - `index`: the index path, and the SHA-256 of each index file (`native_sha256`,
+    `meta_sha256`, `attr_sha256`, `sources_sha256`, `items_sha256`,
+    `items_meta_sha256`, `items_text_sha256`, `item_stopgrams_sha256`; `null` for a
+    file the index lacks); from the index metadata, `normalization_config_sha`,
+    `ngram_config_hash`, the indexed `benchmarks` (`name`, `hf_repo`,
+    `config_name`, `split`, the requested `revision`, the `resolved_revision` and
+    the `dataset_fingerprint`) and the per-benchmark counts (`benchmark_stats`).
+  - `scan_config`: the settings that decide what is flagged: `text_keys`,
+    `messages_key`, `id_key`, `n`, `min_hits`, `min_coverage`,
+    `min_item_coverage`, `gate_mode`, `min_longest_run`, `boilerplate_threshold`,
+    `exact_channel`, `exact_min_chars`, `confirm`, `packed_doc_sep` (`null` under
+    `--no-split`) and `stopgrams_path`.
+  - `config` (the full scan config), `inputs` (the input paths, and the SHA-256 of
+    each Parquet input), tool versions, and stop-gram provenance.
+
+  `reproduce` reads it, re-checks the recorded Parquet input, index metadata and
+  (when recorded) `.native` hashes, and re-runs the scan. Manifests written before
+  the index file hashes, benchmarks and gate settings were recorded lack them
+  (`null` or empty) and still load in `reproduce`, `inspect-run` and `report`.
 - **`summaries/<shard>.summary.json`** holds per-shard counts (including
   `contaminated_by_channel`, as in the final summary), an `error` field when the
   shard failed, and a run fingerprint. A re-run with the same fingerprint skips the

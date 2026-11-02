@@ -1133,6 +1133,14 @@ def reproduce(
     computed = _file_sha256(Path(payload.index.meta_path))
     if payload.index.meta_sha256 and computed != payload.index.meta_sha256:
         raise typer.BadParameter("Index meta sha256 mismatch ...")
+    # Manifests written before the index files were hashed lack native_sha256.
+    if payload.index.native_sha256:
+        computed = _file_sha256(Path(payload.index.path))
+        if computed != payload.index.native_sha256:
+            raise typer.BadParameter(
+                f"Index sha256 mismatch for {payload.index.path} "
+                f"(expected {payload.index.native_sha256}, got {computed})."
+            )
 
     out_dir_p = Path(scan_cfg.out_dir)
     _validate_stopgrams_compatibility(scan_cfg)
