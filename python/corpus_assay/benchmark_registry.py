@@ -16,8 +16,8 @@ from typing import Mapping
 
 from corpus_assay.benchmark_spec import BenchmarkSpec
 
-# Settings the short-item counts below were measured with (corpus-assay 0.1.0,
-# bundled normalization config, 2026-11-01; see issue #14).
+# Settings the short-item counts below were measured with (bundled normalization
+# config, 2026-11-01; see issue #14, which also gives the counts per entry).
 SHORT_ITEM_NGRAM = 13
 SHORT_ITEM_MIN_HITS = 3
 
@@ -218,6 +218,8 @@ REGISTRY = BenchmarkRegistry(
                 fields=["question", "answer"],
             ),
             scored_split="test",
+            item_count=1319,
+            short_items=0,
             notes=(
                 "The question plus the full worked solution, kept apart from gsm8k "
                 "so solution copies stay detectable without changing the question "
@@ -358,6 +360,8 @@ REGISTRY = BenchmarkRegistry(
                 label_field="answer",
             ),
             scored_split="test",
+            item_count=12032,
+            short_items=950,
         ),
         "hellaswag": RegistryEntry(
             BenchmarkSpec(

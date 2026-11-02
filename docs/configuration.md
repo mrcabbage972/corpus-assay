@@ -62,7 +62,7 @@ the dataset is gated, the share of short items, and notes.
 | `amc23` | `math-ai/amc23` | | test | question | 12% |
 | `math500` | `HuggingFaceH4/MATH-500` | | test | problem | 32% |
 | `gsm8k` | `openai/gsm8k` | main | test | question | 2% |
-| `gsm8k_solutions` | `openai/gsm8k` | main | test | question, answer | |
+| `gsm8k_solutions` | `openai/gsm8k` | main | test | question, answer | 0% |
 | `jeebench` | `daman1209arora/jeebench` | `data_files` test.json | test | question | 0% |
 | `gpqa_diamond` | `Idavidrein/gpqa` (gated) | gpqa_diamond | train | Question, Correct Answer, Incorrect Answer 1–3 | |
 | `humaneval` | `openai/openai_humaneval` | | test | prompt | 1% |
@@ -70,7 +70,7 @@ the dataset is gated, the share of short items, and notes.
 | `livecodebench` | `livecodebench/code_generation_lite` | `data_files` test.jsonl … test5.jsonl | test | question_content | |
 | `ifeval` | `google/IFEval` | | train | prompt | 12% |
 | `mmlu` | `cais/mmlu` | all | test | question, choices | 32% |
-| `mmlu_pro` | `TIGER-Lab/MMLU-Pro` | | test | question, options | |
+| `mmlu_pro` | `TIGER-Lab/MMLU-Pro` | | test | question, options | 8% |
 | `hellaswag` | `Rowan/hellaswag` | | **validation** | ctx, endings | 0% |
 | `commonsenseqa` | `tau/commonsense_qa` | | **validation** | question, choices | 95% |
 | `arc` | `allenai/ai2_arc` | ARC-Challenge + ARC-Easy | test | question, choices | 49% |
