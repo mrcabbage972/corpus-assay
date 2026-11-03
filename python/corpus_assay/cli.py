@@ -33,7 +33,7 @@ from corpus_assay.constants import DEFAULT_INDEX_CACHE_DIR
 from corpus_assay.indexing import EmptyBenchmarkError, build_index_hf
 from corpus_assay.inspect import format_benchmark_table, inspect_index, inspect_run
 from corpus_assay.reporting import generate_report_from_scan_dir
-from corpus_assay.scanner import OutputLayout, do_scan, write_run_outputs
+from corpus_assay.scanner import OutputLayout, RunSummary, do_scan, write_run_outputs
 from corpus_assay.scanner.fingerprint import _file_sha256, library_version
 from corpus_assay.scanner.runner import check_item_text_sidecar
 from corpus_assay.schemas import RunManifest
@@ -1133,6 +1133,14 @@ def reproduce(
     computed = _file_sha256(Path(payload.index.meta_path))
     if payload.index.meta_sha256 and computed != payload.index.meta_sha256:
         raise typer.BadParameter("Index meta sha256 mismatch ...")
+    # Manifests written before the index files were hashed lack native_sha256.
+    if payload.index.native_sha256:
+        computed = _file_sha256(Path(payload.index.path))
+        if computed != payload.index.native_sha256:
+            raise typer.BadParameter(
+                f"Index sha256 mismatch for {payload.index.path} "
+                f"(expected {payload.index.native_sha256}, got {computed})."
+            )
 
     out_dir_p = Path(scan_cfg.out_dir)
     _validate_stopgrams_compatibility(scan_cfg)
@@ -1269,6 +1277,220 @@ def scan(
         index_path=index,
     )
     _run_scan(scan_cfg, out_dir_p)
+
+
+@app.command("filter")
+@_with_scan_options
+def filter_cmd(
+    *,
+    inputs: list[str] = typer.Option(
+        ...,
+        "--input",
+        "--input-glob",
+        help=(
+            "Input path(s): directory, glob (recursive), or file list. Repeat --input for multiple."
+        ),
+    ),
+    index: str = typer.Option(..., help="Path to the .native index."),
+    out_dir: str = typer.Option(
+        ...,
+        help=(
+            "Directory for the cleaned shards (at the inputs' paths relative to "
+            "their common directory), _FILTER_MANIFEST.json, removed_ids.ndjson, "
+            "DATASET_CARD_SNIPPET.md and the scan outputs (_scan/)."
+        ),
+    ),
+    opts: ScanOptions,
+    config: str = typer.Option(
+        ..., help="YAML config with decontamination hyperparameters."
+    ),
+    granularity: str = typer.Option(
+        "record",
+        help=(
+            "record: drop every row with a flagged sub-document. subdoc: remove "
+            "only the flagged sub-documents (packed parts are dropped and the rest "
+            "rejoined, an emptied text field is set to '', an emptied chat turn is "
+            "removed); a row left with no text is dropped."
+        ),
+    ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="Replace the outputs of a previous filter run in a non-empty --out-dir.",
+    ),
+) -> None:
+    """Write decontaminated copies of the shards, with a manifest of the index used.
+
+    Scans like `scan` (every flagged record is kept, whatever
+    --max-return-records says), then writes each shard in its own format with
+    the flagged rows (or sub-documents) removed. Input files are not modified.
+    """
+    from corpus_assay import filtering
+
+    if granularity not in ("record", "subdoc"):
+        raise typer.BadParameter(
+            f"--granularity must be record or subdoc (got {granularity!r})."
+        )
+    cfg = load_decontamination_config(Path(config))
+    # Every flagged sub-document must come back to be removed. Built (and its
+    # sidecars checked) before plan_filter clears a previous run's outputs.
+    scan_cfg = _scan_config_from_options(
+        opts._replace(all_records=True),
+        cfg,
+        out_dir=Path(out_dir).resolve() / filtering.SCAN_DIR_NAME,
+        inputs=inputs,
+        index_path=index,
+    )
+    try:
+        plan = filtering.plan_filter(inputs, Path(out_dir), overwrite=overwrite)
+    except (filtering.FilterError, FileNotFoundError) as e:
+        raise typer.BadParameter(str(e)) from e
+    run = do_scan(scan_cfg)
+    write_run_outputs(layout=OutputLayout(plan.scan_dir), run=run, cfg=scan_cfg)
+    try:
+        manifest = filtering.write_filtered(
+            plan,
+            scan_cfg,
+            run,
+            granularity=granularity,  # type: ignore[arg-type]
+            config_path=config,
+        )
+    except filtering.FilterError as e:
+        typer.echo(f"[filter] ERROR: {e}", err=True)
+        raise typer.Exit(code=1) from None
+
+    rem = manifest.removals
+    typer.echo(
+        f"[filter] {len(manifest.shards)} shard(s): {rem.rows_before:,} rows in, "
+        f"{rem.rows_after:,} out ({rem.rows_removed:,} removed"
+        + (f", {rem.rows_modified:,} modified" if granularity == "subdoc" else "")
+        + f"); {rem.flagged_subdocs:,} flagged sub-documents."
+    )
+    for name, counts in rem.by_benchmark.items():
+        typer.echo(
+            f"  {name}: {counts.rows_removed:,} rows removed"
+            + (
+                f", {counts.rows_modified:,} modified"
+                if granularity == "subdoc"
+                else ""
+            )
+        )
+    typer.echo(f"[filter] Wrote {plan.out_dir / filtering.FILTER_MANIFEST_NAME}")
+
+
+def _scan_and_write(scan_cfg: ScanConfig) -> RunSummary:
+    run = do_scan(scan_cfg, print_progress=False)
+    write_run_outputs(
+        layout=OutputLayout(Path(scan_cfg.out_dir)), run=run, cfg=scan_cfg
+    )
+    return run
+
+
+@app.command("selftest")
+@_with_scan_options
+def selftest_cmd(
+    *,
+    index: str = typer.Option(..., help="Path to the .native index."),
+    out_dir: str = typer.Option(
+        ...,
+        help=(
+            "Directory for planted.parquet, truth.jsonl, selftest.json and the "
+            "scans of the planted file (scans/)."
+        ),
+    ),
+    opts: ScanOptions,
+    config: str = typer.Option(
+        ..., help="YAML config with decontamination hyperparameters."
+    ),
+    inputs: list[str] | None = typer.Option(
+        None,
+        "--input",
+        "--input-glob",
+        help="Input shards whose first records host the plants (--host corpus).",
+    ),
+    n_items: int = typer.Option(
+        50, "--n-items", min=1, help="Items to sample from the index."
+    ),
+    seed: int = typer.Option(0, help="Random seed (item sample and perturbations)."),
+    variants: str = typer.Option(
+        "verbatim",
+        help=(
+            "Comma list of plant variants: verbatim, case (upper/lower/title), "
+            "whitespace (collapsed/expanded), wrapper (a lead-in and a trailing line)."
+        ),
+    ),
+    host: str = typer.Option(
+        "synthetic",
+        help=(
+            "Host documents: synthetic filler text, or corpus (copies of the first "
+            "records of --input, read from the scan's text or messages column)."
+        ),
+    ),
+    min_recall: float = typer.Option(
+        1.0,
+        "--min-recall",
+        min=0.0,
+        max=1.0,
+        help=(
+            "Exit non-zero when the recall of the configured gate (and exact "
+            "channel) on matchable verbatim plants is below this."
+        ),
+    ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="Replace a previous selftest in a non-empty --out-dir.",
+    ),
+) -> None:
+    """Plant benchmark items into clean text, scan it, and report recall.
+
+    Samples items from the index's .items.text.jsonl, plants each under each
+    variant, and scans the planted file with this command's scan settings once
+    per gate (union, and item when the index has .items) and, with
+    --exact-channel, once more with the exact channel. Reports recall per run,
+    variant and channel, the missed items, the items no enabled channel can
+    match (left out of recall), and false positives on the unplanted hosts.
+    Every flagged record is kept, and one worker scans the planted file, so
+    --max-return-records and --workers have no effect.
+    """
+    from corpus_assay import selftest
+
+    if host not in ("synthetic", "corpus"):
+        raise typer.BadParameter(f"--host must be synthetic or corpus (got {host!r}).")
+    if host == "corpus" and not inputs:
+        raise typer.BadParameter("--host corpus needs --input.")
+    try:
+        variant_list = selftest.parse_variants(variants)
+    except selftest.SelftestError as e:
+        raise typer.BadParameter(str(e)) from e
+    cfg = load_decontamination_config(Path(config))
+    out_dir_p = Path(out_dir)
+    scan_cfg = _scan_config_from_options(
+        opts._replace(all_records=True),
+        cfg,
+        out_dir=out_dir_p,
+        inputs=list(inputs or []),
+        index_path=index,
+    )
+    try:
+        selftest.prepare_out_dir(out_dir_p, overwrite=overwrite)
+        report = selftest.run_selftest(
+            scan_cfg,
+            out_dir_p,
+            scan=_scan_and_write,
+            n_items=n_items,
+            seed=seed,
+            variants=variant_list,
+            host=host,  # type: ignore[arg-type]
+            min_recall=min_recall,
+        )
+    except selftest.SelftestError as e:
+        typer.echo(f"[selftest] ERROR: {e}", err=True)
+        raise typer.Exit(code=2) from None
+    typer.echo(selftest.format_report(report))
+    typer.echo(f"[selftest] Wrote {out_dir_p / selftest.REPORT_NAME}")
+    if not report.passed:
+        raise typer.Exit(code=1)
 
 
 @app.command("run-hf")

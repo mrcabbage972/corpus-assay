@@ -9,9 +9,10 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from corpus_assay.config import ScanConfig
-from corpus_assay.constants import INDEX_FORMAT_VERSION
+from corpus_assay.constants import INDEX_FORMAT_VERSION, ITEMS_TEXT_SUFFIX
 from corpus_assay.scanner.fingerprint import (
     _file_sha256,
+    build_run_fingerprint,
     library_version,
     rust_extension_version,
 )
@@ -26,7 +27,9 @@ from corpus_assay.schemas import (
     FINAL_SUMMARY_SCHEMA_VERSION,
     RUN_MANIFEST_SCHEMA_VERSION,
     SCAN_SUMMARY_SCHEMA_VERSION,
+    BenchmarkStats,
     FinalSummaryOutput,
+    RunBenchmarkInfo,
     RunHFDatasetInput,
     RunIndexInfo,
     RunInputs,
@@ -97,11 +100,102 @@ def maybe_write_contaminated_docs(
             f.write("\n")
 
 
+def run_fingerprint_of(run: RunSummary, cfg: ScanConfig) -> dict[str, Any]:
+    """The run fingerprint the shards were scanned under.
+
+    Every ok shard summary carries it (a resumed one only when it matched), so
+    the index files are not hashed a second time; computed when no summary has
+    one.
+    """
+    for summary in run.per_file:
+        if summary.run_fingerprint:
+            return summary.run_fingerprint
+    return build_run_fingerprint(cfg)
+
+
+def build_index_info(
+    index_path: Path, run_fingerprint: dict[str, Any] | None = None
+) -> RunIndexInfo:
+    """Describe an index for a manifest: its files' SHA-256 and what it indexed.
+
+    ``run_fingerprint`` (from ``build_run_fingerprint``) supplies the hashes it
+    already holds; the rest are computed. The benchmarks, per-benchmark counts
+    and config hashes come from ``<index>.meta.json`` (left empty when it is
+    missing or unreadable).
+    """
+    fp = run_fingerprint or {}
+
+    def sha(key: str, suffix: str) -> str | None:
+        if key in fp:
+            return fp[key]
+        return _file_sha256(index_path.with_name(f"{index_path.name}{suffix}"))
+
+    meta_path = index_path.with_name(f"{index_path.name}.meta.json")
+    meta: dict[str, Any] = {}
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        meta = {}
+    benchmark_keys = set(RunBenchmarkInfo.model_fields)
+    benchmarks = [
+        RunBenchmarkInfo.model_validate(
+            {k: v for k, v in entry.items() if k in benchmark_keys}
+        )
+        for entry in meta.get("benchmarks") or []
+        if isinstance(entry, dict)
+    ]
+    stats = [
+        BenchmarkStats.model_validate(entry)
+        for entry in meta.get("benchmark_stats") or []
+    ]
+    return RunIndexInfo(
+        path=str(index_path.resolve()),
+        meta_path=str(meta_path.resolve()),
+        index_format_version=INDEX_FORMAT_VERSION,
+        meta_sha256=sha("index_meta_sha256", ".meta.json"),
+        native_sha256=sha("index_sha256", ""),
+        attr_sha256=sha("index_attr_sha256", ".attr"),
+        sources_sha256=_file_sha256(
+            index_path.with_name(f"{index_path.name}.sources.json")
+        ),
+        items_sha256=sha("index_items_sha256", ".items"),
+        items_meta_sha256=sha("index_items_meta_sha256", ".items.meta.json"),
+        items_text_sha256=sha("index_items_text_sha256", ITEMS_TEXT_SUFFIX),
+        item_stopgrams_sha256=sha("index_item_stopgrams_sha256", ".item_stopgrams"),
+        normalization_config_sha=meta.get("normalization_config_sha"),
+        ngram_config_hash=meta.get("ngram_config_hash"),
+        benchmarks=benchmarks,
+        benchmark_stats=stats,
+    )
+
+
+def build_scan_config_info(cfg: ScanConfig) -> RunScanConfig:
+    """The settings that decide what a scan flags, for a manifest."""
+    return RunScanConfig(
+        text_key=cfg.text_keys[0] if cfg.text_keys else None,
+        text_keys=list(cfg.text_keys),
+        messages_key=cfg.messages_key,
+        id_key=cfg.id_key,
+        n=cfg.ngram,
+        min_hits=cfg.min_hits,
+        min_coverage=cfg.min_coverage,
+        min_item_coverage=cfg.min_item_coverage,
+        gate_mode=cfg.gate_mode,
+        min_longest_run=cfg.min_longest_run,
+        boilerplate_threshold=cfg.boilerplate_threshold,
+        exact_channel=cfg.exact_channel,
+        exact_min_chars=cfg.exact_min_chars,
+        confirm=cfg.confirm,
+        packed_doc_sep=cfg.packed_doc_sep,
+        packed_doc_sep_typo=cfg.packed_doc_sep_typo,
+        stopgrams_path=cfg.stopgrams_path,
+    )
+
+
 def write_run_outputs(layout: OutputLayout, run: RunSummary, cfg: ScanConfig) -> None:
     layout.out_dir.mkdir(parents=True, exist_ok=True)
 
     index_path = Path(cfg.index_path)
-    meta_path = index_path.with_name(f"{index_path.name}.meta.json")
 
     parquet_shards: list[RunParquetShard] = []
     for path_str in cfg.inputs:
@@ -136,28 +230,8 @@ def write_run_outputs(layout: OutputLayout, run: RunSummary, cfg: ScanConfig) ->
             rust_extension_version=rust_extension_version(),
             run_id=uuid4(),
             started_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            index=RunIndexInfo(
-                path=str(index_path.resolve()),
-                meta_path=str(meta_path.resolve()),
-                index_format_version=INDEX_FORMAT_VERSION,
-                meta_sha256=_file_sha256(meta_path),
-            ),
-            scan_config=RunScanConfig(
-                text_key=cfg.text_keys[0] if cfg.text_keys else None,
-                text_keys=list(cfg.text_keys),
-                messages_key=cfg.messages_key,
-                id_key=cfg.id_key,
-                n=cfg.ngram,
-                min_hits=cfg.min_hits,
-                min_coverage=cfg.min_coverage,
-                min_item_coverage=cfg.min_item_coverage,
-                exact_channel=cfg.exact_channel,
-                exact_min_chars=cfg.exact_min_chars,
-                confirm=cfg.confirm,
-                packed_doc_sep=cfg.packed_doc_sep,
-                packed_doc_sep_typo=cfg.packed_doc_sep_typo,
-                stopgrams_path=cfg.stopgrams_path,
-            ),
+            index=build_index_info(index_path, run_fingerprint_of(run, cfg)),
+            scan_config=build_scan_config_info(cfg),
             inputs=RunInputs(
                 input_paths=list(cfg.inputs),
                 hf_datasets=hf_datasets,

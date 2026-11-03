@@ -124,6 +124,48 @@ All notable changes to this project are documented here. The format follows
   (`confirmed_pairs`, `template_variants`) and `template_variants.csv` / `.json`.
 - The run manifest's `scan_config` records `exact_channel`, `exact_min_chars` and
   `confirm` (absent in older manifests: off).
+- Records (schema v3, optional fields) gain `row_index`, the record's row in its
+  shard counted from 0 (for JSONL, among the non-blank lines, as the scan reads
+  them), and `part`, the packed part's index within its field or turn (the `<k>` of
+  `-part-<k>`; absent under `--no-split`), so a flagged sub-document can be located
+  without parsing its doc id. Older records still parse.
+- The run manifest records what the index is and how the scan gated (#8):
+  `index` gains the SHA-256 of every index file (`native_sha256`, `attr_sha256`,
+  `sources_sha256`, `items_sha256`, `items_meta_sha256`, `items_text_sha256`,
+  `item_stopgrams_sha256`), `normalization_config_sha`, `ngram_config_hash`, the
+  indexed `benchmarks` (with requested and resolved revisions, splits and dataset
+  fingerprints) and `benchmark_stats`; `scan_config` gains `gate_mode`,
+  `min_longest_run` and `boilerplate_threshold`. All optional: older manifests
+  still load in `reproduce`, `inspect-run` and `report`. `reproduce` also checks
+  the `.native` SHA-256 when the manifest has it.
+- `filter` (#8): scans like `scan` (same options, every flagged record kept) into
+  `<out-dir>/_scan/`, then writes each input shard, cleaned, in its own format at
+  its path relative to the inputs' common directory: Parquet with its schema,
+  metadata, columns and codec; JSONL (`.gz`, `.zst`) keeping every other line byte
+  for byte. `--granularity record` (default) drops every row with a flagged
+  sub-document; `subdoc` drops the flagged packed parts and rejoins the rest,
+  empties a flagged text field (`""`), removes a flagged chat turn, and drops a row
+  left with no text. It writes `_FILTER_MANIFEST.json` (index file hashes,
+  benchmarks with revisions and splits, per-benchmark item and n-gram counts, gate,
+  thresholds and channels, config hashes, tool versions, input and output shard
+  hashes and row counts, removals in total, per benchmark and per channel),
+  `removed_ids.ndjson` (one line per flagged sub-document: shard, row, doc id,
+  field / role / turn / part, benchmarks, channels) and `DATASET_CARD_SNIPPET.md`.
+  It refuses a non-empty `--out-dir` (unless `--overwrite`), an `--out-dir` inside an
+  input directory, shards whose scan outputs would collide (same file stem), and
+  writes nothing when a shard fails to scan.
+- `selftest` (#12): samples `--n-items` (50) items from the index's
+  `.items.text.jsonl` (`--seed`), plants each (fields one per line, list fields one
+  element per line) under each of `--variants` (`verbatim`, `case`, `whitespace`,
+  `wrapper`) into `--host synthetic` filler or `--host corpus` copies of the first
+  records of `--input`, writes `planted.parquet` and `truth.jsonl`, and scans the
+  planted file with the scan options given, once per gate (`union`, and `item` with
+  an `.items` sidecar) and once with the exact channel when `--exact-channel` is
+  set. It prints recall per run, variant and channel, the missed items, false
+  positives on the unplanted hosts, and, apart, the items no enabled channel can
+  match (fewer than `min_hits` n-grams and not covered by the exact channel), which
+  are left out of recall; writes `selftest.json`; and exits 1 when the configured
+  gate's recall on matchable verbatim plants is below `--min-recall` (1.0).
 
 ### Changed
 

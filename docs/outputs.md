@@ -119,11 +119,26 @@ normalization hashes.
   `--spaced-seeds`). A sub-document flagged by several channels counts in each, so
   the channel counts can add up to more than `total_contaminated`. Documents are
   counted per packed sub-document (of each scanned field or chat turn).
-- **`_RUN_MANIFEST.json`** holds the full scan config (including `text_keys`,
-  `messages_key`, `packed_doc_sep`, which is `null` under `--no-split`, and
-  `exact_channel`, `exact_min_chars` and `confirm`), the index
-  paths and SHA-256s, the input file list, tool versions, and stop-gram provenance. `reproduce` reads it,
-  re-checks the recorded hashes, and re-runs the scan.
+- **`_RUN_MANIFEST.json`** describes the run:
+  - `index`: the index path, and the SHA-256 of each index file (`native_sha256`,
+    `meta_sha256`, `attr_sha256`, `sources_sha256`, `items_sha256`,
+    `items_meta_sha256`, `items_text_sha256`, `item_stopgrams_sha256`; `null` for a
+    file the index lacks); from the index metadata, `normalization_config_sha`,
+    `ngram_config_hash`, the indexed `benchmarks` (`name`, `hf_repo`,
+    `config_name`, `split`, the requested `revision`, the `resolved_revision` and
+    the `dataset_fingerprint`) and the per-benchmark counts (`benchmark_stats`).
+  - `scan_config`: the settings that decide what is flagged: `text_keys`,
+    `messages_key`, `id_key`, `n`, `min_hits`, `min_coverage`,
+    `min_item_coverage`, `gate_mode`, `min_longest_run`, `boilerplate_threshold`,
+    `exact_channel`, `exact_min_chars`, `confirm`, `packed_doc_sep` (`null` under
+    `--no-split`) and `stopgrams_path`.
+  - `config` (the full scan config), `inputs` (the input paths, and the SHA-256 of
+    each Parquet input), tool versions, and stop-gram provenance.
+
+  `reproduce` reads it, re-checks the recorded Parquet input, index metadata and
+  (when recorded) `.native` hashes, and re-runs the scan. Manifests written before
+  the index file hashes, benchmarks and gate settings were recorded lack them
+  (`null` or empty) and still load in `reproduce`, `inspect-run` and `report`.
 - **`summaries/<shard>.summary.json`** holds per-shard counts (including
   `contaminated_by_channel`, as in the final summary), an `error` field when the
   shard failed, and a run fingerprint. A re-run with the same fingerprint skips the
@@ -156,7 +171,7 @@ normalization hashes.
                   "item_ngrams": 90, "item_coverage": 0.944,
                   "field_hits": [[0, 60], [1, 25]],
                   "fields_matched": ["question", "choices"]}],
-   "field": "text", "channels": ["ngram"]}
+   "channels": ["ngram"], "field": "text", "part": 0, "row_index": 417}
   ```
 
   A short item flagged by the exact channel, with `--confirm`:
@@ -218,11 +233,86 @@ normalization hashes.
   - `field` is the column the sub-document came from (a text key, or the messages
     key). For a chat turn, `role` is the turn's role (omitted when it has none) and
     `turn` its index in the messages list, counted from 0.
+  - `row_index` is the record's row in the shard, counted from 0 (for JSONL, the
+    index among the non-blank lines: blank and whitespace-only lines are not rows),
+    and `part` the index of the packed part within the field or turn (the `<k>` of
+    `-part-<k>`; absent under `--no-split`). Together with `field` and `turn` they
+    locate the sub-document without parsing the doc id; `filter` uses them.
   - Schema history: v3 added `field`, `role` and `turn`, and later the optional
     `item_hits` fields `item_ngrams`, `item_coverage`, `field_hits` and
-    `fields_matched`, then `channels`, `exact_hits` and the text evidence fields;
-    v2 added `item_hits` and
+    `fields_matched`, then `channels`, `exact_hits` and the text evidence fields,
+    then `row_index` and `part`; v2 added `item_hits` and
     `spaced_item`. Readers (`inspect-run`, `report`) still accept v2 records.
+
+## Filtered data (`filter`)
+
+```
+<out_dir>/
+├── <shards>                  # cleaned copies, at the inputs' relative paths
+├── _FILTER_MANIFEST.json
+├── removed_ids.ndjson
+├── DATASET_CARD_SNIPPET.md
+└── _scan/                    # the scan, as written by `scan` (every flagged record)
+```
+
+- **Cleaned shards** keep the input's format and its path relative to the common
+  directory of all input shards (`data/a/x.parquet` and `data/b/y.jsonl` become
+  `<out_dir>/a/x.parquet` and `<out_dir>/b/y.jsonl`). Parquet keeps the schema,
+  its metadata, every column and the compression codec of the first column; JSONL
+  (`.gz`, `.zst`) keeps every line it does not remove byte for byte, blank lines
+  included, and the compression. With `--granularity subdoc`, a cleaned JSONL line is
+  re-serialized (`json.dumps`, non-ASCII kept), and flagged packed parts are dropped
+  and the rest rejoined with the separator (a typo separator `<|endoftext}>` comes
+  back as `<|endoftext|>`); a text field left with nothing is set to `""`, a chat
+  turn left with nothing is removed from the messages list, and a row left with no
+  text in any scanned column is dropped. Input files are never modified.
+- **`_FILTER_MANIFEST.json`** (`schema_version` 1):
+  - `index` and `scan_config`, as in `_RUN_MANIFEST.json`: the index files'
+    SHA-256, the benchmarks with their revisions, resolved revisions and splits,
+    the per-benchmark item and n-gram counts, the normalization and n-gram config
+    hashes, the gate, thresholds and channels;
+  - `granularity`, `config_path`, `created_at`, `library_version`,
+    `rust_extension_version`, `input_paths` and `config` (the full scan config);
+  - `shards`: per input shard, `input_path`, `input_sha256`, `output_path`
+    (relative to `<out_dir>`), `output_sha256`, `format`, `rows_before`,
+    `rows_after`, `rows_removed`, `rows_modified` (subdoc) and `flagged_subdocs`;
+  - `removals`: the totals (`rows_before`, `rows_after`, `rows_removed`,
+    `rows_modified`, `flagged_subdocs`), `by_benchmark` (the same counts per
+    benchmark) and `by_channel` (flagged sub-documents per channel). A row or
+    sub-document counts for every benchmark its evidence names: the benchmarks of
+    its `src_hits` (named through `.sources.json`) and of its `item_hits`,
+    `exact_hits` and `spaced_item` items. So the per-benchmark counts can add up to
+    more than the totals.
+- **`removed_ids.ndjson`**: one line per flagged sub-document: `shard` (the output
+  path), `row_index`, `doc_id`, `field`, `role`, `turn` and `part` when present,
+  `benchmarks`, `channels`, and `row_removed` (false when `subdoc` kept the row).
+- **`DATASET_CARD_SNIPPET.md`**: a Markdown section for the dataset card, generated
+  from the manifest: the benchmarks with revisions and splits, the matching
+  settings, the tool version, the index SHA-256, the removal counts, the command
+  to reproduce the run and how to cite it.
+
+## Self-test (`selftest`)
+
+```
+<out_dir>/
+├── planted.parquet   # control hosts, then one row per sampled item and variant
+├── truth.jsonl       # per row: row_index, kind (control / plant), doc_id with --id-key,
+│                     #   item_idx, item_id, benchmark, variant, perturbation
+├── selftest.json
+└── scans/<run>/      # each scan of planted.parquet, as written by `scan`
+```
+
+`selftest.json` (`schema_version` 1) holds the `index` and `scan_config` (as in the
+run manifest), the sample (`n_items`, `seed`, `variants`, `host`), each sampled item
+with its indexed n-gram count, question length and whether the n-gram rule and the
+exact channel can match it, the `unmatchable` items (no enabled channel can match
+them; left out of every recall figure), and per run (`union`, `item`, and
+`<gate>+exact` with `--exact-channel`): `overall` and `by_variant` recall
+(`matchable`, `found`, `recall`), `by_channel` (the run with the exact channel:
+`ngram` and `exact`), `attributed` (found plants whose record names the planted
+item), `missed` plants, and `false_positives` among the `controls`. A plant counts
+as found when the run flags any sub-document of its row. `configured_run`,
+`gated_recall`, `min_recall` and `passed` give the verdict the exit code follows.
 
 ## Reports (`report`)
 

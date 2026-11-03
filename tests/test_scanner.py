@@ -207,9 +207,21 @@ def patch_rust_scanner(monkeypatch: pytest.MonkeyPatch) -> None:
         else:
             contaminated = 2
             json_results = [
-                json.dumps({"doc_id": "d1", "src_hits": [[1, 3], [2, 1]]}),
                 json.dumps(
-                    {"doc_id": "d2", "src_hits": [[1, 2], [2, 2]]}
+                    {
+                        "doc_id": "d1",
+                        "src_hits": [[1, 3], [2, 1]],
+                        "part": 0,
+                        "row_index": 0,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "doc_id": "d2",
+                        "src_hits": [[1, 2], [2, 2]],
+                        "part": 0,
+                        "row_index": 1,
+                    }
                 ),  # tie => both primary
             ]
 

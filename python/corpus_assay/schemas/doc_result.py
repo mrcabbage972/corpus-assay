@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 # optional fields under v3 (item_hits' item_ngrams / item_coverage /
 # field_hits / fields_matched; `exact_hits` and `channels`; the text evidence
 # choices_found / choices_total / numbers_total / numbers_matched / lcs_chars /
-# lcs_ratio on item_hits and exact_hits). Mirrors
+# lcs_ratio on item_hits and exact_hits; `row_index` and `part`). Mirrors
 # DOC_RESULT_SCHEMA_VERSION in src/scan.rs.
 DOC_RESULT_SCHEMA_VERSION = 3
 
@@ -80,6 +80,12 @@ class DocResult(BaseModel):
     field: str | None = None
     role: str | None = None
     turn: int | None = Field(default=None, ge=0)
+    # v3: index of the packed part within the field or turn (the `-part-<k>`
+    # of the doc id; absent without splitting) and the 0-based row of the
+    # record in its shard (for JSONL, among the non-blank lines). Absent in
+    # older records.
+    part: int | None = Field(default=None, ge=0)
+    row_index: int | None = Field(default=None, ge=0)
     # v3, exact channel: items whose question occurs verbatim in the document.
     exact_hits: list[ExactHitOut] = Field(default_factory=list)
     # v3: the channels that flagged the document: "ngram", "spaced", "exact".
