@@ -12,8 +12,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from corpus_assay.attribution import AttributionIndex
 from corpus_assay.config import ScanConfig
 from corpus_assay.scanner.fingerprint import library_version
+from corpus_assay.scanner.io import parse_contamination_record, read_item_best
 from corpus_assay.scanner.layout import OutputLayout
-from corpus_assay.scanner.schema import ScanSummary
+from corpus_assay.scanner.schema import ItemBest, ScanSummary
 from corpus_assay.schemas import RunStopGramsInfo
 
 logger = logging.getLogger(__name__)
@@ -111,6 +112,34 @@ class LeakByItemRow(BaseModel):
     leaked_unique: int
     leaked_shared: int
     leaked_boilerplate: int
+    # Best single-document hold on the item: the largest share of its n-grams
+    # any one scanned sub-document held (from per_item_best/), that
+    # sub-document's hits and id, and its shard. None for scans written before
+    # per_item_best/ existed. Compare with leak_fraction, which pools every
+    # document of the corpus.
+    best_doc_coverage: float | None = None
+    best_doc_hits: int | None = None
+    best_doc_id: str | None = None
+    best_doc_shard: str | None = None
+
+
+class FieldMatchSummary(BaseModel):
+    """Which fields of an item the sampled records matched (``.items`` v2 only).
+
+    Counts (record, item) evidence pairs from ``contaminated_docs/`` (a sample
+    unless the scan wrote every record). An item's fields are those of its spec
+    fields that hold at least one indexed n-gram. ``full``: every such field
+    matched (e.g. the question and its choices). ``question_only``: only the
+    first spec field matched. ``partial``: some other subset. ``single_field``:
+    the item has n-grams in only one field, so the split does not apply.
+    """
+
+    records: int = 0
+    item_matches: int = 0
+    full: int = 0
+    question_only: int = 0
+    partial: int = 0
+    single_field: int = 0
 
 
 class ShardLeakRow(BaseModel):
@@ -164,6 +193,9 @@ class ReportPayload(BaseModel):
     # Exact per-item leak, populated when the index has an `.items` sidecar; empty
     # otherwise. Ordered by leak fraction descending.
     leak_by_item: list[LeakByItemRow] = Field(default_factory=list)
+    # Full-item vs question-only matches among the sampled records; None when
+    # the index's `.items` sidecar has no field masks (format v1) or is missing.
+    field_matches: FieldMatchSummary | None = None
     bad_shards: BadShards
     examples: ExamplesSection
     warnings: list[str]
@@ -429,6 +461,21 @@ def _load_item_metadata(index_path: Path) -> list[dict[str, Any]] | None:
     return _load_json(items_meta_path).get("items", [])
 
 
+def _collect_item_best(layout: OutputLayout) -> dict[int, tuple[ItemBest, str]]:
+    """Per item, the best single-document hold over every shard, with its shard.
+
+    Ties keep the first shard in name order.
+    """
+    best: dict[int, tuple[ItemBest, str]] = {}
+    for path in sorted(layout.per_item_best_dir.glob("*.json")):
+        shard = path.name.removesuffix(".json")
+        for entry in read_item_best(path).items:
+            current = best.get(entry.item_id)
+            if current is None or entry.coverage > current[0].coverage:
+                best[entry.item_id] = (entry, shard)
+    return best
+
+
 def _build_leak_by_item(
     *,
     index_path: Path,
@@ -436,6 +483,7 @@ def _build_leak_by_item(
     items_meta: list[dict[str, Any]],
     id_to_name: list[str],
     boilerplate_threshold: int,
+    item_best: dict[int, tuple[ItemBest, str]] | None = None,
 ) -> list[LeakByItemRow]:
     # Exact, exhaustive per-item leak. We stream the static `.items` sidecar and keep
     # only hashes that actually leaked (the exhaustive hits.bin set from _collect_hits),
@@ -470,6 +518,7 @@ def _build_leak_by_item(
         meta = items_meta[it] if 0 <= it < len(items_meta) else {}
         benchmark = str(meta.get("benchmark", ""))
         n_protected = int(meta.get("n_protected_hashes", 0))
+        best = (item_best or {}).get(it)
         rows.append(
             LeakByItemRow(
                 item_idx=it,
@@ -482,6 +531,10 @@ def _build_leak_by_item(
                 leaked_unique=leaked_unique.get(it, 0),
                 leaked_shared=leaked_shared.get(it, 0),
                 leaked_boilerplate=leaked_boiler.get(it, 0),
+                best_doc_coverage=best[0].coverage if best else None,
+                best_doc_hits=best[0].hits if best else None,
+                best_doc_id=best[0].doc_id if best else None,
+                best_doc_shard=best[1] if best else None,
             )
         )
 
@@ -489,6 +542,60 @@ def _build_leak_by_item(
         key=lambda r: (-r.leak_fraction, -r.leaked_hashes, r.benchmark, r.item_id)
     )
     return rows
+
+
+def _build_field_matches(
+    layout: OutputLayout, *, index_path: Path
+) -> FieldMatchSummary | None:
+    items_path = _index_sidecar(index_path, ".items")
+    if not items_path.exists():
+        return None
+    if AttributionIndex.items_sidecar_version(str(items_path)) < 2:
+        return None
+
+    summary = FieldMatchSummary()
+    matches: list[tuple[int, set[int]]] = []
+    for path in sorted(layout.contaminated_dir.glob("*.ndjson")):
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    record = parse_contamination_record(line)
+                except ValueError:
+                    continue  # not a scanner record; `inspect-run` validates them
+                summary.records += 1
+                for hit in record.item_hits:
+                    matched = {field for field, hits in hit.field_hits if hits > 0}
+                    if matched:
+                        matches.append((hit.item_id, matched))
+    if not matches:
+        return summary
+
+    # The fields each matched item has n-grams in, from the static postings.
+    wanted = {item for item, _ in matches}
+    item_fields: dict[int, int] = defaultdict(int)
+    for _hash, postings in AttributionIndex.read_item_postings(str(items_path)):
+        for item, mask in postings:
+            if item in wanted:
+                item_fields[item] |= mask
+
+    for item, matched in matches:
+        fields = {
+            bit
+            for bit in range(AttributionIndex.MAX_ITEM_FIELDS)
+            if item_fields[item] >> bit & 1
+        }
+        summary.item_matches += 1
+        if len(fields) < 2:
+            summary.single_field += 1
+        elif fields <= matched:
+            summary.full += 1
+        elif matched == {0}:
+            summary.question_only += 1
+        else:
+            summary.partial += 1
+    return summary
 
 
 def _build_bad_shards(
@@ -587,6 +694,9 @@ def _render_markdown_report(
         f"- N-gram: `{run_cfg.ngram}`",
         f"- Min hits: `{run_cfg.min_hits}`",
         f"- Min coverage: `{run_cfg.min_coverage}`",
+        f"- Gate mode: `{run_cfg.gate_mode}`",
+        f"- Min item coverage: `{run_cfg.min_item_coverage}`"
+        + (" (off)" if not run_cfg.min_item_coverage else ""),
         f"- {stopgrams_line}",
         "",
         "## Scan summary",
@@ -628,22 +738,29 @@ def _render_markdown_report(
                 "## Leak by item (top 10)",
                 "",
                 "Exact per-item leak (item hashes seen in the corpus / item hashes in "
-                "the index), split by hash fan-out. Exhaustive, not sampled.",
+                "the index), split by hash fan-out, and the best single-document "
+                "coverage (the largest share of the item's n-grams one document "
+                "held). Exhaustive, not sampled.",
                 "",
                 "| Item | Benchmark | Leaked | Protected | Leak fraction | "
-                "Unique/Shared/Boiler |",
-                "| --- | --- | --- | --- | --- | --- |",
+                "Best doc coverage | Unique/Shared/Boiler |",
+                "| --- | --- | --- | --- | --- | --- | --- |",
             ]
         )
         for row in report.leak_by_item[:10]:
             lines.append(
                 "| {item} | {benchmark} | {leaked} | {protected} | {fraction:.4%} | "
-                "{u}/{s}/{b} |".format(
+                "{best} | {u}/{s}/{b} |".format(
                     item=row.item_id.replace("|", "\\|"),
                     benchmark=row.benchmark.replace("|", "\\|"),
                     leaked=row.leaked_hashes,
                     protected=row.n_protected_hashes,
                     fraction=row.leak_fraction,
+                    best=(
+                        f"{row.best_doc_coverage:.2%}"
+                        if row.best_doc_coverage is not None
+                        else "n/a"
+                    ),
                     u=row.leaked_unique,
                     s=row.leaked_shared,
                     b=row.leaked_boilerplate,
@@ -653,6 +770,25 @@ def _render_markdown_report(
             [
                 "",
                 "See `leak_by_item.csv` for the full table.",
+                "",
+            ]
+        )
+
+    if report.field_matches is not None and report.field_matches.item_matches:
+        fm = report.field_matches
+        lines.extend(
+            [
+                "## Item fields matched (sampled records)",
+                "",
+                f"Of {fm.item_matches} item matches in {fm.records} sampled records: "
+                "full items (every field with n-grams matched, e.g. question and "
+                "choices), question-only matches (only the first field), other "
+                "partial matches, and items with n-grams in one field only.",
+                "",
+                "| Full item | Question only | Partial | Single-field item |",
+                "| --- | --- | --- | --- |",
+                f"| {fm.full} | {fm.question_only} | {fm.partial} | "
+                f"{fm.single_field} |",
                 "",
             ]
         )
@@ -789,6 +925,10 @@ def _write_report_artifacts(
             "leaked_unique",
             "leaked_shared",
             "leaked_boilerplate",
+            "best_doc_coverage",
+            "best_doc_hits",
+            "best_doc_id",
+            "best_doc_shard",
         ]
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -893,6 +1033,7 @@ def generate_report_from_scan_dir(
             items_meta=items_meta,
             id_to_name=id_to_name,
             boilerplate_threshold=manifest.config.boilerplate_threshold,
+            item_best=_collect_item_best(layout),
         )
 
     leak_by_shard = sorted(
@@ -908,6 +1049,7 @@ def generate_report_from_scan_dir(
     )
 
     examples = _build_examples(layout, scan_dir=scan_dir_path)
+    field_matches = _build_field_matches(layout, index_path=index_path)
 
     warnings: list[str] = []
 
@@ -935,6 +1077,7 @@ def generate_report_from_scan_dir(
         scan_summary=scan_summary,
         leak_by_benchmark=leak_by_benchmark,
         leak_by_item=leak_by_item,
+        field_matches=field_matches,
         bad_shards=bad_shards,
         examples=examples,
         warnings=warnings,

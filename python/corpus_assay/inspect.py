@@ -167,6 +167,12 @@ def inspect_index(
     benchmark_stats, stats_min_hits = index_benchmark_stats(
         index_path, meta, min_hits=min_hits
     )
+    items_path = _sidecar(index_path, ".items")
+    items_format = (
+        AttributionIndex.items_sidecar_version(str(items_path))
+        if items_path.exists()
+        else None
+    )
     return {
         "ngram": meta.ngram,
         "schema_version": meta.schema_version,
@@ -177,6 +183,10 @@ def inspect_index(
         "attr_header": attr_has_header,
         "benchmark_stats": benchmark_stats,
         "min_hits": stats_min_hits,
+        "items_format": items_format,
+        "item_stopgrams": (
+            meta.item_stopgrams.model_dump() if meta.item_stopgrams else None
+        ),
     }
 
 

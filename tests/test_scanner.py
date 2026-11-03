@@ -67,6 +67,7 @@ def cfg(workdir: Path) -> Any:
                 "gate_mode": self.gate_mode,
                 "min_longest_run": self.min_longest_run,
                 "boilerplate_threshold": self.boilerplate_threshold,
+                "min_item_coverage": self.min_item_coverage,
             }
 
     return Cfg(
@@ -96,6 +97,7 @@ def cfg(workdir: Path) -> Any:
         gate_mode="auto",
         min_longest_run=0,
         boilerplate_threshold=50,
+        min_item_coverage=0.0,
     )
 
 
@@ -178,6 +180,8 @@ def patch_rust_scanner(monkeypatch: pytest.MonkeyPatch) -> None:
         spaced_ver_min_span: int = 17,
         spaced_ver_identity: float = 0.85,
         messages_key: str | None = None,
+        min_item_coverage: float = 0.0,
+        out_item_best_path: str | None = None,
     ):
         # distinguish shards by stem (the hits path embeds it; JSONL input arrives
         # as an in-memory Parquet buffer without a file name)

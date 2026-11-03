@@ -28,6 +28,9 @@ class DecontaminationConfig(BaseModel):
     ngram: int = Field(default=13, gt=0)
     min_hits: int = Field(default=3, gt=0)
     min_coverage: float = Field(default=0.001, ge=0.0, le=1.0)
+    # Share of one item's n-grams a document must hold (with >= min_hits hits) to
+    # be flagged whatever its document coverage; 0 turns it off. See ScanConfig.
+    min_item_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
     background: "BackgroundConfig | None" = None
     stopgrams: "StopGramsConfig | None" = None
     spaced: "SpacedSeedsConfig | None" = None
@@ -119,6 +122,12 @@ class ScanConfig(BaseModel):
     # per-item attribution split (unique / shared / boilerplate) emitted for
     # flagged docs.
     boilerplate_threshold: int = Field(default=50, ge=2)
+    # Per-item coverage threshold: the share of one protected item's indexed
+    # n-grams a document holds (item_coverage = hits / item n-grams). 0 disables.
+    # In union mode an item with >= min_hits hits at this coverage flags the
+    # document whatever its document coverage (an OR path to the union rule); in
+    # item mode it is an extra requirement on the flagging item. Needs `.items`.
+    min_item_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
 
     @field_validator("index_backend")
     @classmethod
@@ -206,6 +215,8 @@ class BuildIndexConfig(BaseModel):
     allow_empty_benchmarks: bool = False
     # Only used to count the items with fewer than min_hits n-grams.
     min_hits: int = Field(default=3, gt=0)
+    # Drop n-grams held by many of the indexed items (None: off).
+    item_stopgrams: ItemStopGramsConfig | None = None
 
     @field_validator("benchmarks")
     @classmethod
@@ -261,11 +272,29 @@ class BackgroundConfig(BaseModel):
     corpus: BackgroundCorpusConfig | None = None
 
 
+class ItemStopGramsConfig(BaseModel):
+    """Stop-grams learned from the indexed items themselves (``stopgrams.items``).
+
+    At index time, an n-gram held by more than ``max_item_share`` of all indexed
+    items, and by at least ``min_count`` items, is dropped from the index (and
+    written to ``<index>.item_stopgrams``). This removes text repeated across
+    items, such as a shared instruction line, before matching.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_item_share: float = Field(default=0.01, gt=0.0, le=1.0)
+    min_count: int = Field(default=10, ge=2)
+
+
 class StopGramsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
     path: str | None = None
+    # Index-time stop-grams learned from the items (off when absent). Independent
+    # of `enabled`/`path`, which apply background stop-grams at scan time.
+    items: ItemStopGramsConfig | None = None
 
     @model_validator(mode="after")
     def _validate_settings(self) -> "StopGramsConfig":

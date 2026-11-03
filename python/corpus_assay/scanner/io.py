@@ -18,6 +18,7 @@ from corpus_assay.scanner.fingerprint import (
 from corpus_assay.scanner.layout import OutputLayout
 from corpus_assay.scanner.schema import (
     ContaminationRecord,
+    ItemBestFile,
     RunSummary,
     ScanSummary,
 )
@@ -66,6 +67,11 @@ def parse_contamination_record(line: str) -> ContaminationRecord:
             for t in items
         ]
     return ContaminationRecord.model_validate(raw)
+
+
+def read_item_best(path: Path) -> ItemBestFile:
+    """Read one shard's ``per_item_best/<shard>.json``."""
+    return ItemBestFile.model_validate_json(path.read_text(encoding="utf-8"))
 
 
 def maybe_write_contaminated_docs(
@@ -144,6 +150,7 @@ def write_run_outputs(layout: OutputLayout, run: RunSummary, cfg: ScanConfig) ->
                 n=cfg.ngram,
                 min_hits=cfg.min_hits,
                 min_coverage=cfg.min_coverage,
+                min_item_coverage=cfg.min_item_coverage,
                 packed_doc_sep=cfg.packed_doc_sep,
                 packed_doc_sep_typo=cfg.packed_doc_sep_typo,
                 stopgrams_path=cfg.stopgrams_path,

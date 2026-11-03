@@ -10,8 +10,10 @@ benchmarks:            # required, at least one; at most 64 per index
 ngram: 13              # n-gram length (tokens)
 min_hits: 3            # distinct matching n-grams needed to flag a document
 min_coverage: 0.001    # matching / distinct n-grams in the document, in [0, 1]
+min_item_coverage: 0   # share of one item's n-grams a document holds; 0 = off
 background: ...        # optional: corpus for build-stopgrams-direct
-stopgrams: ...         # optional: stop-grams to apply during scans
+stopgrams: ...         # optional: stop-grams to apply during scans, and stop-grams
+                       # learned from the items at index time (stopgrams.items)
 spaced: ...            # optional, experimental: spaced-seed index to apply during scans
 ```
 
@@ -159,6 +161,35 @@ estimate is a lower bound, so the list errs toward fewer stop-grams. A
 Stop-grams must have been built with the same `ngram` and normalization config as the
 index. The scan checks this against the `.meta.json` files.
 
+### Stop-grams learned from the items (`stopgrams.items`)
+
+When the protected items share text, such as an instruction repeated in nearly every
+question ("Write Python code to solve the problem...", "Let's think step by step"),
+those n-grams link any document containing the instruction to every item, and they are
+rarely frequent in a background corpus. `stopgrams.items` drops them at index time:
+
+```yaml
+stopgrams:
+  items:
+    max_item_share: 0.01   # drop n-grams held by more than 1% of all indexed items
+    min_count: 10          # ... and by at least 10 items (default)
+```
+
+An n-gram is dropped when more than `max_item_share` of all indexed items (across every
+benchmark of the index) *and* at least `min_count` items hold it. It is removed from
+`.native`, `.attr` and `.items`, each holding item's `n_protected_hashes` goes down, and
+the per-benchmark counts (including the items the n-gram rule cannot flag) are taken
+after the drop. The dropped hashes are written to `<index>.item_stopgrams` and the
+thresholds and count to the index's `.meta.json`. `build-index --item-stopgrams-share`
+and `--item-stopgrams-min-count` override the config values; either one turns item
+stop-grams on. Off by default. Because the n-grams leave the index, a copy of an item
+with its instruction is attributed to that item alone, through n-grams unique to it,
+and a copy under a different instruction holds a larger share of the item. `run` and
+`run-hf` take the setting from the config, whose text keys their index cache.
+
+`stopgrams.items` is independent of `stopgrams.enabled` and `stopgrams.path`, which
+apply background stop-grams at scan time.
+
 ## `spaced` (experimental)
 
 ```yaml
@@ -205,6 +236,7 @@ passed. `run`/`run-hf` also key their index cache on that hash.
 | `--index-backend` | `auto` | `memory` or `mmap`; `auto` uses mmap when `workers > 1`. |
 | `--gate-mode` | `union` | `union` or `item` (see [how-it-works.md](how-it-works.md)). |
 | `--min-longest-run` | `0` | Item gate only: also require a contiguous shared run of N tokens. |
+| `--min-item-coverage` | config `min_item_coverage` (`0`, off) | Share of one item's n-grams a document must hold (`hits / item n-grams`, with at least `min_hits` hits). In `union` mode such a document is flagged whatever its document coverage; in `item` mode it is an extra requirement on the flagging item. Needs `.items`. |
 | `--boilerplate-threshold` | `50` | Item fan-out at which a matched n-gram counts as boilerplate in attribution. |
 | `--max-return-records` | `500` | Flagged records written per shard: a sample of the first N flagged. `0` removes the cap. |
 | `--all-records` | off | Write every flagged record (same as `--max-return-records 0`). |

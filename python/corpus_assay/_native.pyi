@@ -26,6 +26,8 @@ def scan_stream_rust(
     spaced_ver_identity: float = 0.85,
     boilerplate_threshold: int = 50,
     messages_key: str | None = None,
+    min_item_coverage: float = 0.0,
+    out_item_best_path: str | None = None,
 ) -> tuple[int, int, list[str], int]:
     """Scan a Parquet stream; returns ``(scanned, contaminated, records, empty)``.
 
@@ -33,7 +35,10 @@ def scan_stream_rust(
     optional ``list<struct{role, content}>`` chat column. Each text, and each chat
     turn, is scanned as its own sub-document(s). ``packed_doc_sep=None`` turns
     packed-document splitting off; ``max_return_records`` of ``None`` or ``0``
-    returns every flagged record.
+    returns every flagged record. ``min_item_coverage`` > 0 also flags a document
+    holding that share of one item's n-grams (union mode) or requires it of the
+    flagging item (item mode). ``out_item_best_path`` receives, as JSON, the best
+    single-document coverage of each item with a hit (needs item postings).
     """
 
 def set_ngram_config_path(path: str) -> None: ...

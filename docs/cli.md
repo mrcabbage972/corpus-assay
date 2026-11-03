@@ -51,6 +51,8 @@ $ corpus-assay build-index [OPTIONS]
 * `--config <str>`: YAML config with decontamination hyperparameters.  [required]
 * `--allow-unpinned`: Allow benchmarks without a pinned revision.
 * `--allow-empty-benchmarks`: Build the index even if a benchmark loads no rows or indexes no n-grams (by default the build fails and writes nothing).
+* `--item-stopgrams-share <float range>`: Drop n-grams held by more than this share of all indexed items (e.g. 0.01), such as an instruction line repeated across the items, so a wrapped copy of an item still matches in full. Overrides stopgrams.items.max_item_share and turns item stop-grams on.  [default: (config, else off); 0.0&lt;=x&lt;=1.0]
+* `--item-stopgrams-min-count <int range>`: Only drop n-grams held by at least this many items. Overrides stopgrams.items.min_count and turns item stop-grams on.  [default: (config, else 10); x&gt;=2]
 * `--dry-run`: Plan index build only; do not execute.
 * `--help`: Show this message and exit.
 
@@ -247,6 +249,7 @@ $ corpus-assay scan [OPTIONS]
 * `--gate-mode <str>`: Contamination gate. &#x27;union&#x27; (default) flags a document when its matches across the whole index clear min_hits/min_coverage, with per-item attribution when an .items sidecar is present. &#x27;item&#x27; is stricter: a single protected item must clear them on its own (needs the .items sidecar). &#x27;auto&#x27; is an alias for &#x27;union&#x27;.  [default: union]
 * `--min-longest-run <int>`: With --gate-mode item, also require a contiguous run of &gt;= this many normalized tokens shared with the matching item (0 disables).  [default: 0]
 * `--boilerplate-threshold <int>`: Item fan-out at/above which a matched n-gram is counted as boilerplate in the per-item attribution split (unique/shared/boilerplate); must be &gt;= 2.  [default: 50]
+* `--min-item-coverage <float range>`: Share of one item&#x27;s n-grams a document must hold (item coverage = hits / the item&#x27;s n-grams, with at least min_hits hits). With --gate-mode union it also flags such a document whatever its document coverage, so a long document holding a whole item is caught; with --gate-mode item it is an extra requirement on the flagging item. 0 turns it off. Needs the .items sidecar.  [default: (the config&#x27;s min_item_coverage, 0 = off); 0.0&lt;=x&lt;=1.0]
 * `--max-return-records <int range>`: Max flagged sub-document records written per shard to contaminated_docs/: a sample (the first N flagged, in scan order). Use 0 (or --all-records) to write every flagged record. The per-shard counts and hits.bin are always exhaustive.  [default: 500; x&gt;=0]
 * `--all-records`: Write every flagged record to contaminated_docs/ (no cap; same as --max-return-records 0).
 * `--stopgrams <str>`: Path to stop-grams native file (optional).
@@ -284,6 +287,7 @@ $ corpus-assay run-hf [OPTIONS]
 * `--gate-mode <str>`: Contamination gate. &#x27;union&#x27; (default) flags a document when its matches across the whole index clear min_hits/min_coverage, with per-item attribution when an .items sidecar is present. &#x27;item&#x27; is stricter: a single protected item must clear them on its own (needs the .items sidecar). &#x27;auto&#x27; is an alias for &#x27;union&#x27;.  [default: union]
 * `--min-longest-run <int>`: With --gate-mode item, also require a contiguous run of &gt;= this many normalized tokens shared with the matching item (0 disables).  [default: 0]
 * `--boilerplate-threshold <int>`: Item fan-out at/above which a matched n-gram is counted as boilerplate in the per-item attribution split (unique/shared/boilerplate); must be &gt;= 2.  [default: 50]
+* `--min-item-coverage <float range>`: Share of one item&#x27;s n-grams a document must hold (item coverage = hits / the item&#x27;s n-grams, with at least min_hits hits). With --gate-mode union it also flags such a document whatever its document coverage, so a long document holding a whole item is caught; with --gate-mode item it is an extra requirement on the flagging item. 0 turns it off. Needs the .items sidecar.  [default: (the config&#x27;s min_item_coverage, 0 = off); 0.0&lt;=x&lt;=1.0]
 * `--max-return-records <int range>`: Max flagged sub-document records written per shard to contaminated_docs/: a sample (the first N flagged, in scan order). Use 0 (or --all-records) to write every flagged record. The per-shard counts and hits.bin are always exhaustive.  [default: 500; x&gt;=0]
 * `--all-records`: Write every flagged record to contaminated_docs/ (no cap; same as --max-return-records 0).
 * `--stopgrams <str>`: Path to stop-grams native file (optional).
@@ -324,6 +328,7 @@ $ corpus-assay run [OPTIONS]
 * `--gate-mode <str>`: Contamination gate. &#x27;union&#x27; (default) flags a document when its matches across the whole index clear min_hits/min_coverage, with per-item attribution when an .items sidecar is present. &#x27;item&#x27; is stricter: a single protected item must clear them on its own (needs the .items sidecar). &#x27;auto&#x27; is an alias for &#x27;union&#x27;.  [default: union]
 * `--min-longest-run <int>`: With --gate-mode item, also require a contiguous run of &gt;= this many normalized tokens shared with the matching item (0 disables).  [default: 0]
 * `--boilerplate-threshold <int>`: Item fan-out at/above which a matched n-gram is counted as boilerplate in the per-item attribution split (unique/shared/boilerplate); must be &gt;= 2.  [default: 50]
+* `--min-item-coverage <float range>`: Share of one item&#x27;s n-grams a document must hold (item coverage = hits / the item&#x27;s n-grams, with at least min_hits hits). With --gate-mode union it also flags such a document whatever its document coverage, so a long document holding a whole item is caught; with --gate-mode item it is an extra requirement on the flagging item. 0 turns it off. Needs the .items sidecar.  [default: (the config&#x27;s min_item_coverage, 0 = off); 0.0&lt;=x&lt;=1.0]
 * `--max-return-records <int range>`: Max flagged sub-document records written per shard to contaminated_docs/: a sample (the first N flagged, in scan order). Use 0 (or --all-records) to write every flagged record. The per-shard counts and hits.bin are always exhaustive.  [default: 500; x&gt;=0]
 * `--all-records`: Write every flagged record to contaminated_docs/ (no cap; same as --max-return-records 0).
 * `--stopgrams <str>`: Path to stop-grams native file (optional).

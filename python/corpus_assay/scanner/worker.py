@@ -53,6 +53,9 @@ def scan_file(
 ) -> tuple[int, int, int, list[str]]:
     stem = layout.stem_from_path(file_path)
     hits_path = layout.per_hits_path(stem)
+    item_best_path = layout.per_item_best_path(stem)
+    # Written only when the index has item postings; drop one from an earlier run.
+    item_best_path.unlink(missing_ok=True)
     index_backend = _resolve_index_backend(cfg)
 
     with _open_scan_input(file_path, cfg) as f:
@@ -74,6 +77,8 @@ def scan_file(
             gate_mode=cfg.gate_mode,
             min_longest_run=cfg.min_longest_run,
             boilerplate_threshold=cfg.boilerplate_threshold,
+            min_item_coverage=cfg.min_item_coverage,
+            out_item_best_path=str(item_best_path),
             spaced_path=cfg.spaced_path,
             spaced_min_loci=cfg.spaced_min_loci,
             spaced_ver_min_span=cfg.spaced_ver_min_span,

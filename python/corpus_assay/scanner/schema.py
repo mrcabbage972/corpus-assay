@@ -69,6 +69,32 @@ class ItemHit(BaseModel):
     unique_hits: int = Field(default=0, ge=0)
     shared_hits: int = Field(default=0, ge=0)
     boilerplate_hits: int = Field(default=0, ge=0)
+    # v3: the item's indexed n-grams and the share of them the document holds
+    # (hits / item_ngrams). Absent in older records.
+    item_ngrams: int | None = Field(default=None, ge=0)
+    item_coverage: float | None = Field(default=None, ge=0.0)
+    # v3, with an `.items` v2 sidecar: `[field_idx, hits]` for each of the item's
+    # spec fields with a hit, and those fields' names (when the index lists them).
+    field_hits: list[tuple[int, int]] = Field(default_factory=list)
+    fields_matched: list[str] = Field(default_factory=list)
+
+
+class ItemBest(BaseModel):
+    """Best single-document hold on one item in a shard (``per_item_best/``)."""
+
+    model_config = ConfigDict(frozen=True)
+    item_id: int = Field(ge=0)
+    hits: int = Field(ge=0)
+    item_ngrams: int = Field(ge=0)
+    coverage: float = Field(ge=0.0)
+    doc_id: str
+
+
+class ItemBestFile(BaseModel):
+    """``per_item_best/<shard>.json``: every item with a hit in the shard."""
+
+    schema_version: int = 1
+    items: list[ItemBest] = Field(default_factory=list)
 
 
 class ContaminationRecord(BaseModel):
