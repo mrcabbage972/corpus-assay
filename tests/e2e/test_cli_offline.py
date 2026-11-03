@@ -86,6 +86,9 @@ def env(tmp_path: Path) -> dict[str, str]:
         HF_DATASETS_OFFLINE="1",
         HF_HOME=str(tmp_path / "hf_home"),
         HF_DATASETS_CACHE=str(tmp_path / "hf_datasets"),
+        # Typer draws errors in a Rich box wrapped to the terminal width; a wide
+        # console keeps long tmp paths from splitting the words the tests look for.
+        COLUMNS="1000",
     )
     return env
 
