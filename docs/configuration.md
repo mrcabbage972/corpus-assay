@@ -140,6 +140,7 @@ background:
     split: train
     fields: [text]
     revision: null
+    packed_doc_sep: "<|endoftext|>" # default; null keeps each document whole
 stopgrams:
   enabled: true                     # apply during scan/run/run-hf
   path: ./stopgrams.native
@@ -147,7 +148,10 @@ stopgrams:
 
 `background.corpus` needs exactly one of `dataset` or `local_path`. `local_path` is a
 JSONL file. `build-stopgrams-direct --tau T` keeps the n-grams that occur in at least a
-`T` fraction of the background documents (for example `--tau 0.001`). Document
+`T` fraction of the background documents (for example `--tau 0.001`). Background
+records are split into documents on `packed_doc_sep` (and its typo variant
+`packed_doc_sep_typo`, default `<|endoftext}>`); set `packed_doc_sep: null` to keep each
+record whole. Document
 frequency is estimated with a per-worker Space-Saving sketch (`--sketch-size`). The
 estimate is a lower bound, so the list errs toward fewer stop-grams. A
 `--stopgrams PATH` flag overrides `stopgrams.path`.
@@ -194,11 +198,15 @@ passed. `run`/`run-hf` also key their index cache on that hash.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--text-key` / `--id-key` | `text` / none | Columns to read. Without an id, records use a hash of the text. |
+| `--text-key` | `text` | Text column; repeat it to scan several (each is its own document). |
+| `--messages-key` | none | Chat column of `{role, content}` turns; each turn is its own document. |
+| `--id-key` | none | Id column (any type castable to string). Without an id, records use a hash of the text. |
 | `--workers` | CPU count | Worker processes (one shard at a time each). |
 | `--index-backend` | `auto` | `memory` or `mmap`; `auto` uses mmap when `workers > 1`. |
 | `--gate-mode` | `union` | `union` or `item` (see [how-it-works.md](how-it-works.md)). |
 | `--min-longest-run` | `0` | Item gate only: also require a contiguous shared run of N tokens. |
 | `--boilerplate-threshold` | `50` | Item fan-out at which a matched n-gram counts as boilerplate in attribution. |
-| `--max-return-records` | `500` | Sample records written per shard (`0` disables). |
+| `--max-return-records` | `500` | Flagged records written per shard: a sample of the first N flagged. `0` removes the cap. |
+| `--all-records` | off | Write every flagged record (same as `--max-return-records 0`). |
+| `--no-split` | off | Do not split records on the packed-document separator: each record is one document, with id `<id>`. |
 | `--dry-run` | off | Print what would be scanned and exit. |

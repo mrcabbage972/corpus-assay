@@ -27,6 +27,24 @@ All notable changes to this project are documented here. The format follows
   `commonsenseqa`, `arc_challenge`, `arc_easy`, `piqa`. Each entry carries metadata: the
   split harnesses score, whether the dataset is gated, the share of items with fewer than
   3 13-grams, and notes. `describe-benchmark` prints it after the spec, as YAML comments.
+- Several text fields and chat messages per record. `--text-key` is repeatable
+  (`--text-key prompt --text-key chosen --text-key rejected`), and `--messages-key`
+  scans a `list<struct{role, content}>` chat column. Each field, and each chat turn,
+  is scanned as its own document (packed splitting then applies within it), and the
+  records say where the match is: `field`, plus `role` and `turn` for chat turns.
+  This works for Parquet and JSONL; the JSONL conversion keeps every requested column.
+- A warning, once per shard, names the string columns (and chat-like columns) that
+  the scan does not read, and a missing `--id-key` column.
+- `large_string`, string-view and string-dictionary text columns are read; they used to
+  be rejected.
+- `--all-records` on `scan`, `run` and `run-hf` writes every flagged record to
+  `contaminated_docs/` (same as `--max-return-records 0`).
+- `--no-split` on `scan`, `run` and `run-hf` turns off packed-document splitting
+  (both `<|endoftext|>` and its typo variant): each record is scored as one document
+  and its doc id is the plain `<id>`, without a `-part-<k>` suffix. In the config,
+  `background.corpus.packed_doc_sep: null` does the same for `build-stopgrams-direct`.
+  `ScanConfig.packed_doc_sep` and the Rust `scan_stream_rust` accept `None`, and the
+  run manifest records `packed_doc_sep: null`.
 
 ### Changed
 
@@ -48,6 +66,24 @@ All notable changes to this project are documented here. The format follows
   - `lambada`: the `default` config, named explicitly.
 - Every registry entry is pinned to a Hub commit, so configs written by `init-config`
   pass the revision-pin check without `--allow-unpinned`.
+- **Record schema v3.** `contaminated_docs/*.ndjson` records now have
+  `schema_version: 3` and an optional `field` (always written by this version), `role`
+  and `turn`. v2 records still parse (`DocResult`, `parse_contamination_record`,
+  `inspect-run`). `DOC_RESULT_SCHEMA_VERSION` is 3.
+- **Doc ids of multi-field scans.** With several `--text-key`s or a `--messages-key`,
+  doc ids name the field: `<id>/<field>-part-<k>`, or `<id>/<field>/<turn>-part-<k>`
+  for a chat turn. A scan of one text key keeps `<id>-part-<k>`.
+- Non-string id columns (integers and so on) are cast to strings in Parquet input too,
+  instead of being silently ignored in favour of text hashes; an id column that cannot
+  be cast is an error.
+- `ScanConfig` takes `text_keys: list[str]` and `messages_key`; the old
+  `text_key="..."` argument (and old manifests' `config.text_key`) is still accepted.
+  The run manifest's `scan_config` records `text_keys` and `messages_key`.
+  `scan_stream_rust` accepts a list for `text_key` and a `messages_key` argument.
+- The resume fingerprint covers the new config fields, so shards scanned by an
+  earlier version are re-scanned.
+- The order of the options in `scan`/`run`/`run-hf --help` changed slightly: the
+  shared scan options are defined once and listed together.
 
 ### Fixed
 
@@ -55,10 +91,18 @@ All notable changes to this project are documented here. The format follows
   naming registry keys reused an index built from the old registry entries after the
   registry changed. The key now also hashes the resolved benchmark specs. Existing
   cached indexes are rebuilt once.
-
 - `validate-config --check-remote` rejected datasets whose card lists no splits even
   though their `data_files` load (for example `opencompass/AIME2025`: "splits not found
   ... Available: []"). It now takes the split names from the `data_files` keys.
+- `--max-return-records 0` now removes the cap, as its help text said; it used to
+  return no records at all. `ScanConfig(max_return_records=0)` and the Rust scanner
+  treat 0 as no cap too, and the docs now say that the default output is a sample of
+  the first N flagged sub-documents per shard (`hits.bin` is always exhaustive).
+- A script that calls `do_scan` without an `if __name__ == "__main__":` guard now
+  fails with a `RuntimeError` that names the guard. The spawned workers used to re-run
+  the script and the scan at import, die, and be respawned forever, so the run hung.
+- No empty `contaminated_docs/<shard>.decontam.sample.ndjson` is written for a shard
+  with no records, and a stale one from an earlier run of the shard is removed.
 
 ## [0.1.0] - 2026-10-03
 

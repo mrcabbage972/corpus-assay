@@ -82,3 +82,8 @@ class ContaminationRecord(BaseModel):
     item_hits: list[ItemHit] = Field(default_factory=list)
     # Protected item id the spaced channel verified against (spaced-only flags).
     spaced_item: int | None = None
+    # v3: source column (text key or messages key); role and turn index for
+    # chat turns. Absent in v2 records.
+    field: str | None = None
+    role: str | None = None
+    turn: int | None = None

@@ -75,9 +75,11 @@ normalization hashes.
 
 - **`_FINAL_SUMMARY.json`** holds the run totals: `total_files`, `failed_files`,
   `total_docs_scanned`, `total_contaminated`, `contamination_rate` and
-  `total_empty_after_filter`. Documents are counted per packed sub-document.
-- **`_RUN_MANIFEST.json`** holds the full scan config, the index paths and SHA-256s,
-  the input file list, tool versions, and stop-gram provenance. `reproduce` reads it,
+  `total_empty_after_filter`. Documents are counted per packed sub-document (of each
+  scanned field or chat turn).
+- **`_RUN_MANIFEST.json`** holds the full scan config (including `text_keys`,
+  `messages_key`, and `packed_doc_sep`, which is `null` under `--no-split`), the index
+  paths and SHA-256s, the input file list, tool versions, and stop-gram provenance. `reproduce` reads it,
   re-checks the recorded hashes, and re-runs the scan.
 - **`summaries/<shard>.summary.json`** holds per-shard counts, an `error` field when the
   shard failed, and a run fingerprint. A re-run with the same fingerprint skips the
@@ -86,19 +88,48 @@ normalization hashes.
   `<u64 hash, u64 mask>` for **every** distinct matched hash in the shard. `report`
   aggregates these files.
 - **`contaminated_docs/<shard>.decontam.sample.ndjson`** holds one JSON object per
-  flagged sub-document, capped at `--max-return-records`:
+  flagged sub-document. **By default this is a sample:** the first
+  `--max-return-records` (500) flagged sub-documents of each shard, in scan order.
+  Pass `--max-return-records 0` or `--all-records` to write every flagged record (for
+  an audit, or to remove the flagged documents). No file is written for a shard with no
+  records. The counts in the summaries and the `hits.bin` files are exhaustive
+  either way.
 
   ```json
-  {"schema_version": 2, "doc_id": "doc500-part-0", "match_count": 85,
+  {"schema_version": 3, "doc_id": "doc500-part-0", "match_count": 85,
    "src_hits": [[0, 85]],
    "item_hits": [{"item_id": 7, "hits": 85, "longest_run_tokens": 75,
-                  "unique_hits": 85, "shared_hits": 0, "boilerplate_hits": 0}]}
+                  "unique_hits": 85, "shared_hits": 0, "boilerplate_hits": 0}],
+   "field": "text"}
   ```
 
+  A flagged turn of a chat column (`--messages-key messages`):
+
+  ```json
+  {"schema_version": 3, "doc_id": "conv42/messages/3-part-0", "match_count": 40,
+   "src_hits": [[0, 40]], "field": "messages", "role": "assistant", "turn": 3}
+  ```
+
+  - `doc_id` names the sub-document:
+
+    | Scan | `doc_id` |
+    | --- | --- |
+    | one `--text-key`, no `--messages-key` | `<id>-part-<k>` |
+    | several `--text-key`s, or `--messages-key` | `<id>/<field>-part-<k>`, or `<id>/<field>/<turn>-part-<k>` for a chat turn |
+    | `--no-split` | as above, without `-part-<k>` |
+    | no `--id-key` (or an empty id) | a hash of the sub-document text |
+
+    `<k>` counts the packed parts of one text from 0. Non-string ids (integers, ...)
+    are cast to strings.
   - `src_hits` contains `[benchmark_id, hits]` pairs.
   - `item_hits` is present when the index has item postings.
   - `spaced_item` appears when the experimental spaced-seed channel flagged the
     document.
+  - `field` is the column the sub-document came from (a text key, or the messages
+    key). For a chat turn, `role` is the turn's role (omitted when it has none) and
+    `turn` its index in the messages list, counted from 0.
+  - Schema history: v3 added `field`, `role` and `turn`; v2 added `item_hits` and
+    `spaced_item`. Readers (`inspect-run`, `report`) still accept v2 records.
 
 ## Reports (`report`)
 

@@ -20,12 +20,17 @@ class RunIndexInfo(BaseModel):
 class RunScanConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    text_key: str
+    # First text key, kept for readers of older manifests; `text_keys` is the
+    # full list (empty in manifests written before it existed).
+    text_key: str | None = None
+    text_keys: list[str] = Field(default_factory=list)
+    messages_key: str | None = None
     id_key: str | None
     n: int
     min_hits: int
     min_coverage: float
-    packed_doc_sep: str
+    # None: packed-document splitting was off (--no-split).
+    packed_doc_sep: str | None
     packed_doc_sep_typo: str | None
     stopgrams_path: str | None = None
 

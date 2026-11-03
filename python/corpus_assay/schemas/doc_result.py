@@ -4,7 +4,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 # v2 adds per-item attribution evidence (item_hits) and spaced_item, emitted by
 # the scanner in item gate mode / union mode with an `.items` sidecar.
-DOC_RESULT_SCHEMA_VERSION = 2
+# v3 adds where in the record the sub-document came from: `field` (the text or
+# messages column), and for chat turns `role` and `turn`. Mirrors
+# DOC_RESULT_SCHEMA_VERSION in src/scan.rs.
+DOC_RESULT_SCHEMA_VERSION = 3
 
 
 class SourceHitOut(BaseModel):
@@ -40,6 +43,11 @@ class DocResult(BaseModel):
     )
     # Protected item id the spaced channel verified against (spaced-only flags).
     spaced_item: int | None = None
+    # v3: the column the sub-document came from (a text key or the messages
+    # key) and, for chat turns, the turn's role and its index in the list.
+    field: str | None = None
+    role: str | None = None
+    turn: int | None = Field(default=None, ge=0)
 
     def normalized_doc_id(self) -> str:
         return str(self.doc_id)

@@ -63,12 +63,18 @@ remains is specific to the protected split, so a corpus that legitimately contai
 
 Each shard is processed by one worker process, in this order:
 
-1. The text column is read in batches. JSONL shards are first converted to Parquet in
-   memory.
+1. The text columns (`--text-key`, repeatable) and the chat column (`--messages-key`)
+   are read in batches. JSONL shards are first converted to Parquet in memory. Each
+   text, and each chat turn, is handled as its own text from here on, so a match never
+   spans two fields or two turns. String columns that are not scanned are reported in
+   a warning.
 2. Each row is split into **sub-documents** on `<|endoftext|>`, the packed-document
    separator; the variant typo `<|endoftext}>` is treated the same way. Sub-documents
    shorter than `2·n` bytes or `n` tokens are skipped. Counts and records refer to
-   sub-documents, with ids `<id>-part-<k>`.
+   sub-documents, with ids `<id>-part-<k>` (see [outputs.md](outputs.md) for the ids
+   of multi-field scans). `--no-split` turns this off (for chat data
+   or decoded text that may legitimately contain the token): each row is then one
+   document, with id `<id>`.
 3. The sub-document is normalized and its **distinct** allowed n-gram hashes are
    collected.
 4. If stop-grams are enabled, hashes in the stop-gram set are removed. The coverage
@@ -83,9 +89,11 @@ Each shard is processed by one worker process, in this order:
    - Spaced seeds (experimental, opt-in): when the exact gate does not fire, the
      spaced-seed verifier can still flag the document. See
      [experimental-spaced-seeds.md](experimental-spaced-seeds.md).
-6. For flagged documents, a sample record is emitted (up to `--max-return-records` per
-   shard, default 500). It carries per-benchmark hit counts and, when the index has item
-   postings, per-item evidence. Each item's hits are split into:
+6. For flagged documents, a record is emitted. By default this is a sample: the first
+   `--max-return-records` flagged sub-documents per shard (default 500); `--all-records`
+   or `--max-return-records 0` emits every one. It carries per-benchmark hit counts
+   and, when the index has item postings, per-item evidence. Each item's hits are
+   split into:
    - **unique**: the n-gram belongs to just this item;
    - **shared**: it belongs to a few items;
    - **boilerplate**: it belongs to `>= --boilerplate-threshold` items (default 50).

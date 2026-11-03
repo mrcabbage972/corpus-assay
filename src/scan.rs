@@ -8,18 +8,25 @@ use crate::text::{
     doc_identity_rust, get_word_re, hash_ngram_text, join_ngram_window, ngram_allowed_rust,
     normalize_text_rust, FIELD_SEPARATOR,
 };
-use arrow::array::RecordBatchReader;
+use arrow::array::{ArrayRef, AsArray, RecordBatchReader};
+use arrow::buffer::NullBuffer;
+use arrow::compute::can_cast_types;
+use arrow::datatypes::DataType;
+use arrow::record_batch::RecordBatch;
 use once_cell::sync::Lazy;
 use parquet::file::reader::ChunkReader;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyAny;
+use pyo3::types::{PyAny, PyString};
+use regex::Regex;
 
 use arrow::array::{Array, StringArray};
 use byteorder::{LittleEndian, WriteBytesExt};
 use hashbrown::{HashMap, HashSet};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::Serialize;
+use std::borrow::Cow;
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -41,8 +48,13 @@ struct ItemHit {
     boilerplate_hits: usize,
 }
 
+/// Version of the flagged-document records (`FileScanResult`); mirrored by
+/// `DOC_RESULT_SCHEMA_VERSION` in `python/corpus_assay/schemas/doc_result.py`.
+/// v3 adds `field`, `role` and `turn`.
+const DOC_RESULT_SCHEMA_VERSION: u32 = 3;
+
 #[derive(Serialize)]
-struct FileScanResult {
+struct FileScanResult<'a> {
     schema_version: u32,
     doc_id: String,
     match_count: usize,
@@ -57,6 +69,15 @@ struct FileScanResult {
     /// flagged by the spaced channel rather than the exact gate. `None` for exact flags.
     #[serde(skip_serializing_if = "Option::is_none")]
     spaced_item: Option<u32>,
+    /// Column the sub-document came from: a text key, or the messages key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    field: Option<&'a str>,
+    /// Chat role of the turn (messages column only, when the turn has one).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<&'a str>,
+    /// Index of the turn in the messages list (messages column only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    turn: Option<u32>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -93,9 +114,16 @@ fn load_stopgrams_cached(path: &str) -> PyResult<Arc<StopGramsSet>> {
 
 #[derive(Clone)]
 struct PreparedScan {
-    text_key: String,
+    /// Text columns; each is scanned as its own sub-document(s).
+    text_keys: Vec<String>,
+    /// Optional chat column (`list<struct{role, content}>`); each turn is its own
+    /// sub-document(s).
+    messages_key: Option<String>,
     id_key: Option<String>,
-    packed_doc_sep: String,
+    /// Separator that packed records are split on. `None` disables splitting (and
+    /// the typo replacement): each record is one document and its id gets no
+    /// `-part-<k>` suffix.
+    packed_doc_sep: Option<String>,
     packed_doc_sep_typo: Option<String>,
     backend: IndexBackend,
     out_hits_path: Option<String>,
@@ -252,9 +280,437 @@ fn item_gate(
     (flagged, best_hits, evidence)
 }
 
+/// The parts of a packed record: split on `sep`, or the whole text when `sep` is
+/// `None` (no splitting).
+fn split_packed<'a>(text: &'a str, sep: Option<&'a str>) -> impl Iterator<Item = &'a str> + 'a {
+    let mut whole = Some(text);
+    let mut parts = sep.map(|sep| text.split(sep));
+    std::iter::from_fn(move || match parts.as_mut() {
+        Some(parts) => parts.next(),
+        None => whole.take(),
+    })
+}
+
 #[derive(Clone)]
 struct ScanLimits {
     max_return_records: Option<usize>,
+}
+
+/// One text of a record, before packed splitting: a text column (`field` is the
+/// column name) or one chat turn of the messages column (`field` is the messages
+/// column name, with the turn's `role` and its index `turn` in the list).
+struct Segment<'a> {
+    field: &'a str,
+    role: Option<&'a str>,
+    turn: Option<u32>,
+    text: &'a str,
+}
+
+/// Evidence for a flagged sub-document.
+struct Flag {
+    match_count: usize,
+    src_hits: Vec<(u32, usize)>,
+    item_hits: Vec<ItemHit>,
+    spaced_item: Option<u32>,
+}
+
+enum SubDocOutcome {
+    /// Empty or shorter than `2·n` bytes: not counted as scanned.
+    Skipped,
+    /// Every n-gram was a stop-gram.
+    EmptyAfterFilter,
+    Clean,
+    Flagged(Flag),
+}
+
+/// Scores sub-documents. The buffers are reused across sub-documents (cleared
+/// on each use) to avoid per-doc allocation in the hot scan loop;
+/// `matched_hash_to_mask` accumulates over the whole shard for `hits.bin`.
+#[derive(Default)]
+struct Scorer {
+    matched_hash_to_mask: HashMap<u64, u64>,
+    doc_shingles: HashSet<u64>,
+    positions: Vec<(u64, usize)>,
+    hits_by_src: HashMap<u32, usize>,
+    indexed: HashSet<u64>,
+    per_item_hits: HashMap<u32, (usize, usize, usize)>,
+    item_run_state: HashMap<u32, (i64, usize, usize)>,
+}
+
+impl Scorer {
+    fn score(&mut self, cfg: &PreparedScan, re: &'static Regex, sub_text: &str) -> SubDocOutcome {
+        if sub_text.is_empty() || (sub_text.len() < cfg.n * 2) {
+            return SubDocOutcome::Skipped;
+        }
+
+        let toks = normalize_text_rust(sub_text, re);
+        if toks.len() < cfg.n {
+            return SubDocOutcome::Clean;
+        }
+
+        // Positional n-gram stream (token order), reused for the unique
+        // shingle set, the per-benchmark mask hits, and per-item runs.
+        self.positions.clear();
+        self.doc_shingles.clear();
+        for (pos, win) in toks.windows(cfg.n).enumerate() {
+            if win.iter().any(|token| token == FIELD_SEPARATOR) {
+                continue;
+            }
+            let ngram = join_ngram_window(win);
+            if !ngram_allowed_rust(&ngram) {
+                continue;
+            }
+            let hash = hash_ngram_text(&ngram);
+            self.doc_shingles.insert(hash);
+            self.positions.push((hash, pos));
+        }
+        if self.doc_shingles.is_empty() {
+            return SubDocOutcome::Clean;
+        }
+        let denom_all = self.doc_shingles.len().max(1) as f64;
+        if let Some(stopgrams) = cfg.stopgrams.as_ref() {
+            self.doc_shingles.retain(|hash| !stopgrams.contains(*hash));
+            self.positions
+                .retain(|(hash, _)| !stopgrams.contains(*hash));
+        }
+        if self.doc_shingles.is_empty() {
+            return SubDocOutcome::EmptyAfterFilter;
+        }
+
+        // Per-benchmark mask hits (used for the union gate, the per-source
+        // reporting, and the matched-hash sidecar) — computed in both modes.
+        // `indexed` is the subset of doc shingles actually present in the
+        // active native/attr index; item gating is restricted to it so a
+        // stale or mismatched `.items` sidecar cannot decide a scan.
+        let mut distinct_hits = 0usize;
+        self.hits_by_src.clear();
+        self.indexed.clear();
+        for h in self.doc_shingles.iter() {
+            if let Some(mask) = cfg.mask_for_hash(*h) {
+                distinct_hits += 1;
+                self.indexed.insert(*h);
+                let mut m = mask;
+                while m != 0 {
+                    let bit = m.trailing_zeros();
+                    *self.hits_by_src.entry(bit).or_insert(0) += 1;
+                    m &= m - 1;
+                }
+                *self.matched_hash_to_mask.entry(*h).or_insert(0) |= mask;
+            }
+        }
+
+        // Decide flag + per-item evidence according to the gate mode.
+        let (mut flagged, match_count, item_hits) = match cfg.gate_mode {
+            GateMode::Union => {
+                let coverage = (distinct_hits as f64) / denom_all;
+                let flag = distinct_hits >= cfg.min_hits && coverage >= cfg.min_coverage;
+                // Gate on the union (max recall); when item postings are
+                // available, attach per-item attribution for flagged docs.
+                let evidence = match cfg.item_postings.as_ref() {
+                    Some(postings) if flag => self.item_gate(cfg, postings, denom_all).2,
+                    _ => Vec::new(),
+                };
+                (flag, distinct_hits, evidence)
+            }
+            GateMode::Item => {
+                let postings = cfg
+                    .item_postings
+                    .as_ref()
+                    .expect("item gate mode requires an item postings index");
+                self.item_gate(cfg, postings, denom_all)
+            }
+        };
+
+        // Spaced-seed recall channel: union recall = exact gate OR spaced
+        // verifier. Short-circuit when the exact gate already flagged (the flag
+        // is decided; spaced attribution is only meaningful for spaced-only
+        // flags). Runs on the already-normalised `toks`, so no re-tokenisation.
+        let mut spaced_item: Option<u32> = None;
+        if !flagged {
+            if let Some(spaced) = cfg.spaced.as_ref() {
+                spaced_item = spaced.verified_item(&toks);
+                flagged = spaced_item.is_some();
+            }
+        }
+
+        if !flagged {
+            return SubDocOutcome::Clean;
+        }
+        // drain (not into_iter) so the reused buffer is emptied, not moved.
+        let src_hits: Vec<(u32, usize)> =
+            self.hits_by_src.drain().filter(|&(_, v)| v > 0).collect();
+        SubDocOutcome::Flagged(Flag {
+            match_count,
+            src_hits,
+            item_hits,
+            spaced_item,
+        })
+    }
+
+    fn item_gate(
+        &mut self,
+        cfg: &PreparedScan,
+        postings: &ItemPostings,
+        denom_all: f64,
+    ) -> (bool, usize, Vec<ItemHit>) {
+        item_gate(
+            postings,
+            &self.indexed,
+            &self.positions,
+            denom_all,
+            cfg.n,
+            cfg.min_hits,
+            cfg.min_coverage,
+            cfg.min_longest_run,
+            cfg.boilerplate_threshold,
+            &mut self.per_item_hits,
+            &mut self.item_run_state,
+        )
+    }
+}
+
+/// Doc id of one sub-document.
+///
+/// With one text key and no messages key (the classic single-column scan) the id
+/// is `<id>-part-<k>`, as before. With several text keys or a messages key it
+/// names the field (and turn) too: `<id>/<field>-part-<k>` or
+/// `<id>/<field>/<turn>-part-<k>`. Without splitting (`--no-split`) the
+/// `-part-<k>` suffix is dropped. A record without an id falls back to a hash of
+/// the sub-document text.
+fn sub_doc_id(
+    id: Option<&str>,
+    name_fields: bool,
+    seg: &Segment<'_>,
+    part: usize,
+    split: bool,
+    sub_text: &str,
+) -> String {
+    let Some(id) = id else {
+        return doc_identity_rust(None, sub_text);
+    };
+    let mut out = String::with_capacity(id.len() + seg.field.len() + 16);
+    out.push_str(id);
+    if name_fields {
+        out.push('/');
+        out.push_str(seg.field);
+        if let Some(turn) = seg.turn {
+            let _ = write!(out, "/{}", turn);
+        }
+    }
+    if split {
+        let _ = write!(out, "-part-{}", part);
+    }
+    out
+}
+
+/// Accumulates the per-shard counts and the returned records.
+struct ShardScan<'c> {
+    cfg: &'c PreparedScan,
+    limits: ScanLimits,
+    re: &'static Regex,
+    /// Whether doc ids name the field (several text keys or a messages key).
+    name_fields: bool,
+    scorer: Scorer,
+    scanned: usize,
+    contaminated: usize,
+    empty_after_filter: usize,
+    results: Vec<String>,
+}
+
+impl ShardScan<'_> {
+    fn scan_segment(&mut self, id: Option<&str>, seg: &Segment<'_>) -> Result<(), String> {
+        if seg.text.is_empty() {
+            return Ok(());
+        }
+        let cfg = self.cfg;
+        let packed: Cow<'_, str> = match (&cfg.packed_doc_sep, &cfg.packed_doc_sep_typo) {
+            (Some(sep), Some(typo)) if seg.text.contains(typo.as_str()) => {
+                Cow::Owned(seg.text.replace(typo.as_str(), sep))
+            }
+            _ => Cow::Borrowed(seg.text),
+        };
+        for (part, sub_text) in split_packed(&packed, cfg.packed_doc_sep.as_deref()).enumerate() {
+            let flag = match self.scorer.score(cfg, self.re, sub_text) {
+                SubDocOutcome::Skipped => continue,
+                SubDocOutcome::EmptyAfterFilter => {
+                    self.scanned += 1;
+                    self.empty_after_filter += 1;
+                    continue;
+                }
+                SubDocOutcome::Clean => {
+                    self.scanned += 1;
+                    continue;
+                }
+                SubDocOutcome::Flagged(flag) => flag,
+            };
+            self.scanned += 1;
+            self.contaminated += 1;
+            if self
+                .limits
+                .max_return_records
+                .is_some_and(|limit| self.results.len() >= limit)
+            {
+                continue;
+            }
+            let rec = FileScanResult {
+                schema_version: DOC_RESULT_SCHEMA_VERSION,
+                doc_id: sub_doc_id(
+                    id,
+                    self.name_fields,
+                    seg,
+                    part,
+                    cfg.packed_doc_sep.is_some(),
+                    sub_text,
+                ),
+                match_count: flag.match_count,
+                src_hits: flag.src_hits,
+                item_hits: flag.item_hits,
+                spaced_item: flag.spaced_item,
+                field: Some(seg.field),
+                role: seg.role,
+                turn: seg.turn,
+            };
+            self.results
+                .push(serde_json::to_string(&rec).map_err(|e| e.to_string())?);
+        }
+        Ok(())
+    }
+}
+
+/// A string column as a `StringArray`: `Utf8` as is; `LargeUtf8`, `Utf8View`,
+/// string dictionaries and all-null columns are cast.
+fn utf8_column(col: &ArrayRef, what: &str, name: &str) -> Result<StringArray, String> {
+    let castable = match col.data_type() {
+        DataType::Utf8 => return Ok(col.as_string::<i32>().clone()),
+        DataType::LargeUtf8 | DataType::Utf8View | DataType::Null => true,
+        DataType::Dictionary(_, values) => matches!(
+            values.as_ref(),
+            DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+        ),
+        _ => false,
+    };
+    if !castable {
+        return Err(format!(
+            "{} column '{}' has type {}; expected a string column",
+            what,
+            name,
+            col.data_type()
+        ));
+    }
+    cast_to_utf8(col, what, name)
+}
+
+fn cast_to_utf8(col: &ArrayRef, what: &str, name: &str) -> Result<StringArray, String> {
+    let cast = arrow::compute::cast(col, &DataType::Utf8)
+        .map_err(|e| format!("Cannot read {} column '{}' as text: {}", what, name, e))?;
+    Ok(cast.as_string::<i32>().clone())
+}
+
+/// The id column as strings. Non-string ids (integers and so on) are cast,
+/// rather than silently ignored in favour of text hashes.
+fn id_column(col: &ArrayRef, name: &str) -> Result<StringArray, String> {
+    match col.data_type() {
+        DataType::Utf8 => Ok(col.as_string::<i32>().clone()),
+        dt if can_cast_types(dt, &DataType::Utf8) => cast_to_utf8(col, "Id", name),
+        other => Err(format!(
+            "Id column '{}' has type {}, which cannot be used as a doc id",
+            name, other
+        )),
+    }
+}
+
+/// A chat column, `list<struct{role, content}>`, flattened for one batch.
+struct MessagesColumn {
+    /// Row `i` holds turns `offsets[i]..offsets[i + 1]`.
+    offsets: Vec<usize>,
+    row_nulls: Option<NullBuffer>,
+    turn_nulls: Option<NullBuffer>,
+    roles: Option<StringArray>,
+    contents: StringArray,
+}
+
+impl MessagesColumn {
+    fn new(col: &ArrayRef, name: &str) -> Result<Self, String> {
+        let (offsets, values, row_nulls): (Vec<usize>, ArrayRef, Option<NullBuffer>) =
+            match col.data_type() {
+                DataType::List(_) => {
+                    let list = col.as_list::<i32>();
+                    (
+                        list.value_offsets().iter().map(|&o| o as usize).collect(),
+                        Arc::clone(list.values()),
+                        list.nulls().cloned(),
+                    )
+                }
+                DataType::LargeList(_) => {
+                    let list = col.as_list::<i64>();
+                    (
+                        list.value_offsets().iter().map(|&o| o as usize).collect(),
+                        Arc::clone(list.values()),
+                        list.nulls().cloned(),
+                    )
+                }
+                DataType::Null => {
+                    return Ok(Self {
+                        offsets: vec![0; col.len() + 1],
+                        row_nulls: None,
+                        turn_nulls: None,
+                        roles: None,
+                        contents: StringArray::from(Vec::<&str>::new()),
+                    })
+                }
+                other => {
+                    return Err(format!(
+                "Messages column '{}' has type {}; expected a list of {{role, content}} structs",
+                name, other
+            ))
+                }
+            };
+        let turns = values.as_struct_opt().ok_or_else(|| {
+            format!(
+                "Messages column '{}' holds {} items; expected {{role, content}} structs",
+                name,
+                values.data_type()
+            )
+        })?;
+        let contents = turns.column_by_name("content").ok_or_else(|| {
+            format!(
+                "Messages column '{}' has no 'content' field in its items",
+                name
+            )
+        })?;
+        let contents = utf8_column(contents, "Messages content", name)?;
+        let roles = turns
+            .column_by_name("role")
+            .map(|roles| utf8_column(roles, "Messages role", name))
+            .transpose()?;
+        Ok(Self {
+            offsets,
+            row_nulls,
+            turn_nulls: turns.nulls().cloned(),
+            roles,
+            contents,
+        })
+    }
+
+    /// `(turn index, role, content)` for each turn of `row` with content.
+    fn turns(&self, row: usize) -> impl Iterator<Item = (u32, Option<&str>, &str)> + '_ {
+        let (start, end) = if self.row_nulls.as_ref().is_some_and(|n| n.is_null(row)) {
+            (0, 0)
+        } else {
+            (self.offsets[row], self.offsets[row + 1])
+        };
+        (start..end).filter_map(move |j| {
+            if self.turn_nulls.as_ref().is_some_and(|n| n.is_null(j)) || self.contents.is_null(j) {
+                return None;
+            }
+            let role = self
+                .roles
+                .as_ref()
+                .filter(|roles| roles.is_valid(j))
+                .map(|roles| roles.value(j));
+            Some(((j - start) as u32, role, self.contents.value(j)))
+        })
+    }
 }
 
 /// Scan a Parquet reader (must be Read+Seek) for contamination.
@@ -262,270 +718,102 @@ fn scan_reader<R>(reader: R, cfg: PreparedScan, limits: ScanLimits) -> Result<Sc
 where
     R: ChunkReader + 'static,
 {
-    let re = get_word_re();
-    let mut matched_hash_to_mask: HashMap<u64, u64> = HashMap::new();
+    let mut arrow_reader = ParquetRecordBatchReaderBuilder::try_new(reader)
+        .and_then(|b| b.with_batch_size(1024).build())
+        .map_err(|e| e.to_string())?;
 
-    // Reused across sub-documents (cleared each iteration) to avoid per-doc
-    // allocation in the hot scan loop.
-    let mut doc_shingles: HashSet<u64> = HashSet::new();
-    let mut positions: Vec<(u64, usize)> = Vec::new();
-    let mut hits_by_src: HashMap<u32, usize> = HashMap::new();
-    let mut indexed: HashSet<u64> = HashSet::new();
-    let mut per_item_hits: HashMap<u32, (usize, usize, usize)> = HashMap::new();
-    let mut item_run_state: HashMap<u32, (i64, usize, usize)> = HashMap::new();
-
-    let mut arrow_reader = match ParquetRecordBatchReaderBuilder::try_new(reader) {
-        Ok(b) => match b.with_batch_size(1024).build() {
-            Ok(r) => r,
-            Err(e) => return Err(e.to_string()),
-        },
-        Err(e) => return Err(e.to_string()),
-    };
-
-    // schema() is available on the built reader
     let schema = arrow_reader.schema();
-    let text_col_idx = match schema.index_of(&cfg.text_key) {
-        Ok(v) => v,
-        Err(e) => {
-            return Err(format!(
-                "Text key '{}' not found in schema: {}",
-                cfg.text_key, e
-            ))
-        }
+    let mut text_cols: Vec<(&str, usize)> = Vec::with_capacity(cfg.text_keys.len());
+    for key in &cfg.text_keys {
+        let idx = schema
+            .index_of(key)
+            .map_err(|e| format!("Text key '{}' not found in schema: {}", key, e))?;
+        text_cols.push((key.as_str(), idx));
+    }
+    let messages_col: Option<(&str, usize)> = match cfg.messages_key.as_deref() {
+        Some(key) => Some((
+            key,
+            schema
+                .index_of(key)
+                .map_err(|e| format!("Messages key '{}' not found in schema: {}", key, e))?,
+        )),
+        None => None,
     };
-
-    let id_col_idx = cfg
+    // A missing id column falls back to text hashes (the Python side warns).
+    let id_col: Option<(&str, usize)> = cfg
         .id_key
-        .as_ref()
-        .and_then(|key| schema.index_of(key).ok());
+        .as_deref()
+        .and_then(|key| schema.index_of(key).ok().map(|idx| (key, idx)));
 
-    let mut total_scanned = 0usize;
-    let mut total_contaminated = 0usize;
-    let mut empty_after_filter = 0usize;
-    let mut results_vec: Vec<String> = Vec::new();
-    let mut returned_count = 0usize;
     let log_empty_filtered = std::env::var_os("CORPUS_ASSAY_SCAN_LOG_EMPTY_FILTERED").is_some();
+    let mut shard = ShardScan {
+        cfg: &cfg,
+        limits,
+        re: get_word_re(),
+        name_fields: cfg.text_keys.len() != 1 || cfg.messages_key.is_some(),
+        scorer: Scorer::default(),
+        scanned: 0,
+        contaminated: 0,
+        empty_after_filter: 0,
+        results: Vec::new(),
+    };
 
     for batch_result in arrow_reader.by_ref() {
-        // Pin the concrete item type so Rust stops guessing
-        let batch_result: Result<arrow::record_batch::RecordBatch, arrow::error::ArrowError> =
-            batch_result;
+        let batch: RecordBatch = batch_result.map_err(|e| e.to_string())?;
 
-        let batch = batch_result.map_err(|e| e.to_string())?;
+        let texts: Vec<(&str, StringArray)> = text_cols
+            .iter()
+            .map(|&(key, idx)| Ok((key, utf8_column(batch.column(idx), "Text", key)?)))
+            .collect::<Result<_, String>>()?;
+        let messages: Option<(&str, MessagesColumn)> = match messages_col {
+            Some((key, idx)) => Some((key, MessagesColumn::new(batch.column(idx), key)?)),
+            None => None,
+        };
+        let ids: Option<StringArray> = match id_col {
+            Some((key, idx)) => Some(id_column(batch.column(idx), key)?),
+            None => None,
+        };
 
-        let text_array = batch
-            .column(text_col_idx)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| "Text column is not a string type".to_string())?;
+        for row in 0..batch.num_rows() {
+            let id: Option<&str> = ids
+                .as_ref()
+                .filter(|ids| ids.is_valid(row))
+                .map(|ids| ids.value(row))
+                .filter(|id| !id.is_empty());
 
-        let id_array: Option<&StringArray> =
-            id_col_idx.and_then(|idx| batch.column(idx).as_any().downcast_ref::<StringArray>());
-
-        for i in 0..text_array.len() {
-            if !text_array.is_valid(i) {
-                continue;
-            }
-
-            let packed_text_original: &str = text_array.value(i);
-            if packed_text_original.is_empty() {
-                continue;
-            }
-
-            let packed_text: String = if let Some(ref typo) = cfg.packed_doc_sep_typo {
-                packed_text_original.replace(typo, &cfg.packed_doc_sep)
-            } else {
-                packed_text_original.to_string()
-            };
-
-            let original_id_val: Option<&str> = id_array.and_then(|arr| {
-                if arr.is_valid(i) {
-                    Some(arr.value(i))
-                } else {
-                    None
-                }
-            });
-
-            for (sub_doc_index, sub_text) in
-                packed_text.as_str().split(&cfg.packed_doc_sep).enumerate()
-            {
-                let sub_text: &str = sub_text;
-                if sub_text.is_empty() || (sub_text.len() < cfg.n * 2) {
-                    continue;
-                }
-                total_scanned += 1;
-
-                let toks = normalize_text_rust(sub_text, re);
-                if toks.len() < cfg.n {
-                    continue;
-                }
-
-                // Positional n-gram stream (token order), reused for the unique
-                // shingle set, the per-benchmark mask hits, and per-item runs.
-                positions.clear();
-                doc_shingles.clear();
-                for (pos, win) in toks.windows(cfg.n).enumerate() {
-                    if win.iter().any(|token| token == FIELD_SEPARATOR) {
-                        continue;
-                    }
-                    let ngram = join_ngram_window(win);
-                    if !ngram_allowed_rust(&ngram) {
-                        continue;
-                    }
-                    let hash = hash_ngram_text(&ngram);
-                    doc_shingles.insert(hash);
-                    positions.push((hash, pos));
-                }
-                if doc_shingles.is_empty() {
-                    continue;
-                }
-                let denom_all = doc_shingles.len().max(1) as f64;
-                if let Some(stopgrams) = cfg.stopgrams.as_ref() {
-                    doc_shingles.retain(|hash| !stopgrams.contains(*hash));
-                    positions.retain(|(hash, _)| !stopgrams.contains(*hash));
-                }
-                if doc_shingles.is_empty() {
-                    empty_after_filter += 1;
-                    continue;
-                }
-
-                // Per-benchmark mask hits (used for the union gate, the per-source
-                // reporting, and the matched-hash sidecar) — computed in both modes.
-                // `indexed` is the subset of doc shingles actually present in the
-                // active native/attr index; item gating is restricted to it so a
-                // stale or mismatched `.items` sidecar cannot decide a scan.
-                let mut distinct_hits = 0usize;
-                hits_by_src.clear();
-                indexed.clear();
-                for h in doc_shingles.iter() {
-                    if let Some(mask) = cfg.mask_for_hash(*h) {
-                        distinct_hits += 1;
-                        indexed.insert(*h);
-                        if mask != 0 {
-                            let mut m = mask;
-                            while m != 0 {
-                                let bit = m.trailing_zeros();
-                                *hits_by_src.entry(bit).or_insert(0) += 1;
-                                m &= m - 1;
-                            }
-                        }
-                        let entry = matched_hash_to_mask.entry(*h).or_insert(0);
-                        *entry |= mask;
-                    }
-                }
-
-                // Decide flag + per-item evidence according to the gate mode.
-                let (mut flagged, report_count, item_hits_vec) = match cfg.gate_mode {
-                    GateMode::Union => {
-                        let coverage = (distinct_hits as f64) / denom_all;
-                        let flag = distinct_hits >= cfg.min_hits && coverage >= cfg.min_coverage;
-                        // Gate on the union (max recall); when item postings are
-                        // available, attach per-item attribution for flagged docs.
-                        let evidence = if flag {
-                            if let Some(postings) = cfg.item_postings.as_ref() {
-                                item_gate(
-                                    postings,
-                                    &indexed,
-                                    &positions,
-                                    denom_all,
-                                    cfg.n,
-                                    cfg.min_hits,
-                                    cfg.min_coverage,
-                                    cfg.min_longest_run,
-                                    cfg.boilerplate_threshold,
-                                    &mut per_item_hits,
-                                    &mut item_run_state,
-                                )
-                                .2
-                            } else {
-                                Vec::new()
-                            }
-                        } else {
-                            Vec::new()
-                        };
-                        (flag, distinct_hits, evidence)
-                    }
-                    GateMode::Item => {
-                        let postings = cfg
-                            .item_postings
-                            .as_ref()
-                            .expect("item gate mode requires an item postings index");
-                        item_gate(
-                            postings,
-                            &indexed,
-                            &positions,
-                            denom_all,
-                            cfg.n,
-                            cfg.min_hits,
-                            cfg.min_coverage,
-                            cfg.min_longest_run,
-                            cfg.boilerplate_threshold,
-                            &mut per_item_hits,
-                            &mut item_run_state,
-                        )
-                    }
-                };
-
-                // Spaced-seed recall channel: union recall = exact gate OR spaced
-                // verifier. Short-circuit when the exact gate already flagged (the flag
-                // is decided; spaced attribution is only meaningful for spaced-only
-                // flags). Runs on the already-normalised `toks`, so no re-tokenisation.
-                let mut spaced_item: Option<u32> = None;
-                if !flagged {
-                    if let Some(spaced) = cfg.spaced.as_ref() {
-                        spaced_item = spaced.verified_item(&toks);
-                        if spaced_item.is_some() {
-                            flagged = true;
-                        }
-                    }
-                }
-
-                if flagged {
-                    total_contaminated += 1;
-
-                    let sub_doc_id = if let Some(original_id) = original_id_val {
-                        if !original_id.is_empty() {
-                            format!("{}-part-{}", original_id, sub_doc_index)
-                        } else {
-                            doc_identity_rust(None, sub_text)
-                        }
-                    } else {
-                        doc_identity_rust(None, sub_text)
+            for (field, array) in &texts {
+                if array.is_valid(row) {
+                    let seg = Segment {
+                        field,
+                        role: None,
+                        turn: None,
+                        text: array.value(row),
                     };
-
-                    let mut src_hits_vec: Vec<(u32, usize)> = Vec::with_capacity(hits_by_src.len());
-                    // drain (not into_iter) so the reused buffer is emptied, not moved.
-                    for (k, v) in hits_by_src.drain() {
-                        if v > 0 {
-                            src_hits_vec.push((k, v));
-                        }
-                    }
-
-                    if limits
-                        .max_return_records
-                        .is_none_or(|limit| returned_count < limit)
-                    {
-                        let rec = FileScanResult {
-                            schema_version: 2,
-                            doc_id: sub_doc_id,
-                            match_count: report_count,
-                            src_hits: src_hits_vec,
-                            item_hits: item_hits_vec,
-                            spaced_item,
-                        };
-                        results_vec.push(serde_json::to_string(&rec).map_err(|e| e.to_string())?);
-                        returned_count += 1;
-                    }
+                    shard.scan_segment(id, &seg)?;
+                }
+            }
+            if let Some((field, messages)) = &messages {
+                for (turn, role, text) in messages.turns(row) {
+                    let seg = Segment {
+                        field,
+                        role,
+                        turn: Some(turn),
+                        text,
+                    };
+                    shard.scan_segment(id, &seg)?;
                 }
             }
         }
     }
 
-    if let Some(path) = cfg.out_hits_path {
-        let file = File::create(&path)
+    if let Some(path) = cfg.out_hits_path.as_deref() {
+        let file = File::create(path)
             .map_err(|e| format!("Failed to create per-hits file '{}': {}", path, e))?;
         let mut w = BufWriter::new(file);
-        let mut sorted_pairs: Vec<(u64, u64)> = matched_hash_to_mask.into_iter().collect();
+        let mut sorted_pairs: Vec<(u64, u64)> =
+            std::mem::take(&mut shard.scorer.matched_hash_to_mask)
+                .into_iter()
+                .collect();
         sorted_pairs.sort_unstable_by_key(|(h, _)| *h);
         write_header(
             &mut w,
@@ -541,24 +829,25 @@ where
         w.flush().map_err(|e| e.to_string())?;
     }
 
-    if log_empty_filtered && empty_after_filter > 0 {
+    if log_empty_filtered && shard.empty_after_filter > 0 {
         eprintln!(
             "[scan] {} docs had all shingles filtered (stop-grams)",
-            empty_after_filter
+            shard.empty_after_filter
         );
     }
 
     Ok((
-        total_scanned,
-        total_contaminated,
-        results_vec,
-        empty_after_filter,
+        shard.scanned,
+        shard.contaminated,
+        shard.results,
+        shard.empty_after_filter,
     ))
 }
 
 #[allow(clippy::too_many_arguments)]
 fn prepare_scan(
-    text_key: &str,
+    text_keys: Vec<String>,
+    messages_key: Option<&str>,
     id_key: Option<&str>,
     index_path: &str,
     index_backend: &str,
@@ -566,7 +855,7 @@ fn prepare_scan(
     min_hits: usize,
     min_coverage: f64,
     out_hits_path: Option<&str>,
-    packed_doc_sep: &str,
+    packed_doc_sep: Option<&str>,
     packed_doc_sep_typo: Option<&str>,
     stopgrams_path: Option<&str>,
     gate_mode: &str,
@@ -580,6 +869,22 @@ fn prepare_scan(
     if min_hits == 0 {
         return Err(PyValueError::new_err("min_hits must be >= 1"));
     }
+    if text_keys.is_empty() && messages_key.is_none() {
+        return Err(PyValueError::new_err(
+            "at least one text key or a messages key is required",
+        ));
+    }
+    {
+        let mut seen: HashSet<&str> = HashSet::new();
+        for key in text_keys.iter().map(String::as_str).chain(messages_key) {
+            if key.is_empty() || !seen.insert(key) {
+                return Err(PyValueError::new_err(format!(
+                    "text and messages keys must be non-empty and distinct; got '{}' twice or empty",
+                    key
+                )));
+            }
+        }
+    }
     if boilerplate_threshold < 2 {
         return Err(PyValueError::new_err(
             "boilerplate_threshold must be >= 2 (a hash in <2 items cannot be boilerplate)",
@@ -588,8 +893,10 @@ fn prepare_scan(
     if !(0.0..=1.0).contains(&min_coverage) {
         return Err(PyValueError::new_err("min_coverage must be in [0,1]"));
     }
-    if packed_doc_sep.is_empty() {
-        return Err(PyValueError::new_err("packed_doc_sep must be non-empty"));
+    if packed_doc_sep == Some("") {
+        return Err(PyValueError::new_err(
+            "packed_doc_sep must be non-empty (pass None to disable splitting)",
+        ));
     }
     let index_ngram = get_index_ngram(index_path)?;
     if index_ngram != n {
@@ -680,11 +987,14 @@ fn prepare_scan(
     };
 
     Ok(PreparedScan {
-        text_key: text_key.to_string(),
+        text_keys,
+        messages_key: messages_key.map(str::to_string),
         id_key: id_key.map(|s| s.to_string()),
-        packed_doc_sep: packed_doc_sep.to_string(),
-        packed_doc_sep_typo: match packed_doc_sep_typo {
-            Some(typo) if !typo.is_empty() => Some(typo.to_string()),
+        packed_doc_sep: packed_doc_sep.map(str::to_string),
+        // The typo variant is only rewritten into the separator; with splitting
+        // off there is nothing to rewrite it into.
+        packed_doc_sep_typo: match (packed_doc_sep, packed_doc_sep_typo) {
+            (Some(_), Some(typo)) if !typo.is_empty() => Some(typo.to_string()),
             _ => None,
         },
         backend,
@@ -727,11 +1037,11 @@ fn pyfile_to_tempfile(obj: &Bound<'_, PyAny>) -> PyResult<File> {
 
 #[allow(clippy::too_many_arguments)]
 #[pyfunction]
-#[pyo3(signature = (input, text_key, id_key, index_path, n, min_hits, min_coverage, index_backend="auto", out_hits_path=None, packed_doc_sep="<|endoftext|>", packed_doc_sep_typo="<|endoftext}>", max_return_records=Some(500), stopgrams_path=None, gate_mode="auto", min_longest_run=0, spaced_path=None, spaced_min_loci=3, spaced_ver_min_span=17, spaced_ver_identity=0.85, boilerplate_threshold=50))]
+#[pyo3(signature = (input, text_key, id_key, index_path, n, min_hits, min_coverage, index_backend="auto", out_hits_path=None, packed_doc_sep=Some("<|endoftext|>"), packed_doc_sep_typo=Some("<|endoftext}>"), max_return_records=Some(500), stopgrams_path=None, gate_mode="auto", min_longest_run=0, spaced_path=None, spaced_min_loci=3, spaced_ver_min_span=17, spaced_ver_identity=0.85, boilerplate_threshold=50, messages_key=None))]
 pub fn scan_stream_rust(
     py: Python<'_>,
     input: Bound<'_, PyAny>,
-    text_key: &str,
+    text_key: Bound<'_, PyAny>,
     id_key: Option<&str>,
     index_path: &str,
     n: usize,
@@ -739,7 +1049,7 @@ pub fn scan_stream_rust(
     min_coverage: f64,
     index_backend: &str,
     out_hits_path: Option<&str>,
-    packed_doc_sep: &str,
+    packed_doc_sep: Option<&str>,
     packed_doc_sep_typo: Option<&str>,
     max_return_records: Option<usize>,
     stopgrams_path: Option<&str>,
@@ -750,9 +1060,17 @@ pub fn scan_stream_rust(
     spaced_ver_min_span: usize,
     spaced_ver_identity: f64,
     boilerplate_threshold: usize,
+    messages_key: Option<&str>,
 ) -> PyResult<(usize, usize, Vec<String>, usize)> {
+    // `text_key` is one column name or a list of them.
+    let text_keys: Vec<String> = if text_key.is_instance_of::<PyString>() {
+        vec![text_key.extract()?]
+    } else {
+        text_key.extract()?
+    };
     let cfg = prepare_scan(
-        text_key,
+        text_keys,
+        messages_key,
         id_key,
         index_path,
         index_backend,
@@ -772,7 +1090,11 @@ pub fn scan_stream_rust(
         spaced_ver_identity,
     )?;
 
-    let limits = ScanLimits { max_return_records };
+    // `None` and `Some(0)` both mean "no cap": 0 used to return no records at all,
+    // contradicting the documented "use 0 to disable".
+    let limits = ScanLimits {
+        max_return_records: max_return_records.filter(|&limit| limit > 0),
+    };
 
     let temp_file = pyfile_to_tempfile(&input)?;
     let file_processing_result = py.detach(move || scan_reader(temp_file, cfg, limits));

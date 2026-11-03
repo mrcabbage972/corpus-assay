@@ -146,3 +146,81 @@ def test_scan_stream_rust_rejects_zero_min_hits(scan_index: dict[str, Any]) -> N
             min_hits=0,
             min_coverage=0.0,
         )
+
+
+@pytest.mark.parametrize("limit", [None, 0])
+def test_scan_stream_rust_uncapped_returns_every_record(
+    tmp_path: Path, scan_index: dict[str, Any], limit: int | None
+) -> None:
+    """``None`` and ``0`` both remove the cap (0 used to return no records)."""
+    n_docs = 7
+    parquet_data = _parquet_bytes(
+        [scan_index["text"]] * n_docs,  # type: ignore
+        [f"doc-{i}" for i in range(n_docs)],
+    )
+
+    scanned, contaminated, results, _ = scan_stream_rust(
+        input=io.BytesIO(parquet_data),
+        text_key="text",
+        id_key="doc_id",
+        index_path=scan_index["index_path"],
+        n=scan_index["ngram"],
+        min_hits=1,
+        min_coverage=0.0,
+        out_hits_path=str(tmp_path / "hits.bin"),
+        max_return_records=limit,
+    )
+
+    assert scanned == contaminated == n_docs
+    assert sorted(json.loads(r)["doc_id"] for r in results) == sorted(
+        f"doc-{i}-part-0" for i in range(n_docs)
+    )
+
+
+@pytest.mark.parametrize(
+    ("sep", "expected_ids"),
+    [
+        ("<|endoftext|>", ["doc-1-part-0", "doc-1-part-1", "doc-1-part-2"]),
+        (None, ["doc-1"]),
+    ],
+)
+def test_scan_stream_rust_no_split(
+    tmp_path: Path,
+    scan_index: dict[str, Any],
+    sep: str | None,
+    expected_ids: list[str],
+) -> None:
+    """``packed_doc_sep=None`` keeps a record whole, separator tokens included."""
+    text = scan_index["text"]
+    packed = f"{text}<|endoftext|>{text}<|endoftext}}>{text}"  # typo variant too
+    parquet_data = _parquet_bytes([packed], ["doc-1"])
+
+    scanned, contaminated, results, _ = scan_stream_rust(
+        input=io.BytesIO(parquet_data),
+        text_key="text",
+        id_key="doc_id",
+        index_path=scan_index["index_path"],
+        n=scan_index["ngram"],
+        min_hits=1,
+        min_coverage=0.0,
+        out_hits_path=str(tmp_path / "hits.bin"),
+        packed_doc_sep=sep,
+    )
+
+    assert scanned == contaminated == len(expected_ids)
+    assert sorted(json.loads(r)["doc_id"] for r in results) == expected_ids
+
+
+def test_scan_stream_rust_rejects_empty_separator(scan_index: dict[str, Any]) -> None:
+    parquet_data = _parquet_bytes([scan_index["text"]], ["doc-1"])  # type: ignore
+    with pytest.raises(ValueError, match="packed_doc_sep must be non-empty"):
+        scan_stream_rust(
+            input=io.BytesIO(parquet_data),
+            text_key="text",
+            id_key="doc_id",
+            index_path=scan_index["index_path"],
+            n=scan_index["ngram"],
+            min_hits=1,
+            min_coverage=0.0,
+            packed_doc_sep="",
+        )
