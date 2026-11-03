@@ -135,7 +135,8 @@ def test_record_granularity_drops_flagged_rows(
         '{"id":   "b2", "text": "' + CLEAN2 + '"}\r\n',
         json.dumps({"id": "b3", "text": f"{LEAK} again"}),
     ]
-    (shards / "sub" / "b.jsonl").write_text("".join(jsonl_lines), encoding="utf-8")
+    # Write bytes: text mode would turn "\n" into "\r\n" on Windows.
+    (shards / "sub" / "b.jsonl").write_bytes("".join(jsonl_lines).encode("utf-8"))
     with gzip.open(shards / "sub" / "c.jsonl.gz", "wt", encoding="utf-8") as fh:
         fh.write(json.dumps({"id": "c0", "text": LEAK}) + "\n")
         fh.write(json.dumps({"id": "c1", "text": CLEAN}) + "\n")
