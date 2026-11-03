@@ -46,7 +46,13 @@ from the Hugging Face Hub or from local `data_files`. It writes:
 - `index.native.items` (+ `.items.meta.json`): for each hash, the ids of the individual
   items that contain it. Used for per-item attribution and the item gate.
 - `index.native.sources.json` and `index.native.meta.json`: the benchmark legend and
-  provenance (configs, dataset fingerprints, revisions, normalization hashes).
+  provenance (configs, dataset fingerprints, revisions, normalization hashes), plus
+  per-benchmark item and n-gram counts.
+
+**Empty benchmarks fail the build.** If a benchmark loads no rows (a dataset removed
+from the Hub, a gated dataset without a login, a wrong split or path) or contributes no
+n-grams, `build-index` stops before writing anything and names the benchmark and the
+reason. `--allow-empty-benchmarks` (also on `run` and `run-hf`) builds the index anyway.
 
 **Subtraction splits.** If a benchmark sets `subtraction_splits` (for example
 `[train]`), n-grams that also occur in those splits are removed from the index. What

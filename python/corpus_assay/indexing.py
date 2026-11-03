@@ -17,11 +17,13 @@ from corpus_assay._native import (
     normalize_text,
 )
 from corpus_assay.attribution import AttributionIndex
+from corpus_assay.benchmark_registry import REGISTRY
 from corpus_assay.benchmark_spec import BenchmarkSpec
-from corpus_assay.benchmarks import BenchmarkLoader
+from corpus_assay.benchmarks import BenchmarkLoader, BenchmarkLoadStatus
 from corpus_assay.config import BuildIndexConfig
 from corpus_assay.constants import INDEX_FORMAT_VERSION
 from corpus_assay.formats import FileType, write_header
+from corpus_assay.inspect import format_benchmark_table
 from corpus_assay.normalization import active_ngram_config_path
 from corpus_assay.scanner.fingerprint import (
     library_version,
@@ -50,6 +52,7 @@ def _benchmark_spec_meta(spec: BenchmarkSpec) -> dict[str, object]:
         "configs": list(spec.configs),
         "drop_configs": list(spec.drop_configs or []),
         "trust_remote_code": bool(spec.trust_remote_code),
+        "label_field": spec.label_field,
     }
 
 
@@ -104,6 +107,33 @@ def _collect_unique_hashes(
     return hashes
 
 
+@dataclass
+class BenchmarkBuildStats:
+    """What one benchmark contributed to the index."""
+
+    name: str
+    dataset: str
+    items: int = 0
+    ngrams: int = 0
+    items_zero_ngrams: int = 0
+    items_below_min_hits: int = 0
+    min_hits: int = 3
+    # Why configs/splits failed to load, and hidden-label warnings (not recorded
+    # in the index meta; they feed the build-time error and summary).
+    load_failures: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+    def to_meta(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "items": self.items,
+            "ngrams": self.ngrams,
+            "items_zero_ngrams": self.items_zero_ngrams,
+            "items_below_min_hits": self.items_below_min_hits,
+            "min_hits": self.min_hits,
+        }
+
+
 @dataclass(frozen=True)
 class BuildIndexResult:
     ngram: int
@@ -112,16 +142,22 @@ class BuildIndexResult:
     stats: BuildIndexStats
     benchmark_specs: list[dict[str, object]]
     dataset_fingerprints: list[dict[str, object]]
+    benchmark_stats: list[BenchmarkBuildStats] = field(default_factory=list)
 
 
 def build_index(
     *,
     benchmarks: Iterable[BenchmarkSpec],
     ngram: int,
+    min_hits: int = 3,
     loader_factory: Callable[[BenchmarkSpec], BenchmarkLoader] = BenchmarkLoader,
 ) -> BuildIndexResult:
     """
     Pure core: computes hashes + attribution in memory. No filesystem I/O.
+
+    Also counts, per benchmark, the items and n-grams indexed and the items the
+    n-gram rule cannot flag (fewer than ``min_hits`` n-grams); see
+    :func:`empty_benchmark_problems` for the check run on those counts.
     """
     disable_caching()
 
@@ -129,6 +165,8 @@ def build_index(
     stats = BuildIndexStats()
     benchmark_specs: list[dict[str, object]] = []
     dataset_fingerprints: list[dict[str, object]] = []
+    benchmark_stats: list[BenchmarkBuildStats] = []
+    item_ranges: list[tuple[int, int]] = []
 
     for spec in benchmarks:
         benchmark_specs.append(_benchmark_spec_meta(spec))
@@ -144,6 +182,7 @@ def build_index(
         # stream positives and add directly (lower peak memory). Each positive
         # text is one protected evaluation item; record per-item postings so the
         # scanner can gate on single-item overlap (not benchmark-wide aggregation).
+        first_item = len(attribution.items_meta)
         for text in tqdm(loader.load_positive(), desc=f"{spec.name} [Index]"):
             item_idx = attribution.register_item(spec.name)
             toks = normalize_text(text)
@@ -154,6 +193,39 @@ def build_index(
                 attribution.add_hash_for_source(h, spec.name)
                 attribution.add_hash_for_item(h, item_idx)
         dataset_fingerprints.extend(getattr(loader, "dataset_fingerprints", []))
+        item_ranges.append((first_item, len(attribution.items_meta)))
+        status = getattr(loader, "load_status", None)
+        benchmark_stats.append(
+            BenchmarkBuildStats(
+                name=spec.name,
+                dataset=spec.dataset,
+                min_hits=min_hits,
+                load_failures=(
+                    list(status.failures)
+                    if isinstance(status, BenchmarkLoadStatus)
+                    else []
+                ),
+                warnings=(
+                    list(status.warnings)
+                    if isinstance(status, BenchmarkLoadStatus)
+                    else []
+                ),
+            )
+        )
+
+    # Hash counts are final only after every benchmark (later ones never remove
+    # hashes, but count from the finished map to match the .sources.json totals).
+    per_source = attribution.per_source_totals()
+    for bstats, (start, end) in zip(benchmark_stats, item_ranges):
+        sid = attribution.name_to_id.get(bstats.name)
+        bstats.ngrams = per_source.get(sid, 0) if sid is not None else 0
+        counts = [
+            int(item["n_protected_hashes"])
+            for item in attribution.items_meta[start:end]
+        ]
+        bstats.items = len(counts)
+        bstats.items_zero_ngrams = sum(1 for c in counts if c == 0)
+        bstats.items_below_min_hits = sum(1 for c in counts if c < min_hits)
 
     hashes = set(attribution.hash2mask.keys())
     return BuildIndexResult(
@@ -163,7 +235,61 @@ def build_index(
         stats=stats,
         benchmark_specs=benchmark_specs,
         dataset_fingerprints=dataset_fingerprints,
+        benchmark_stats=benchmark_stats,
     )
+
+
+class EmptyBenchmarkError(ValueError):
+    """A configured benchmark loaded no rows or indexed no n-grams."""
+
+
+def empty_benchmark_problems(result: BuildIndexResult) -> list[str]:
+    """One message per benchmark that loaded no rows or indexed no n-grams."""
+    problems: list[str] = []
+    for bstats in result.benchmark_stats:
+        label = f"{bstats.name} ({bstats.dataset})"
+        if bstats.items == 0:
+            reasons = "; ".join(bstats.load_failures) or (
+                "the requested splits are empty"
+            )
+            message = f"{label}: loaded no rows. {reasons}"
+            gated = REGISTRY.is_gated_dataset(bstats.dataset) or any(
+                "gated" in failure.lower() for failure in bstats.load_failures
+            )
+            if gated:
+                message += (
+                    "\n    This dataset is gated on the Hugging Face Hub: log in "
+                    "with `hf auth login` and accept the dataset terms at "
+                    f"https://huggingface.co/datasets/{bstats.dataset}."
+                )
+            problems.append(message)
+        elif bstats.ngrams == 0:
+            problems.append(
+                f"{label}: loaded {bstats.items:,} items but indexed no n-grams. "
+                f"Its item fields may be shorter than ngram={result.ngram} tokens "
+                "(n-grams never cross fields), or every n-gram was rejected or "
+                "subtracted."
+            )
+    return problems
+
+
+def check_benchmarks_not_empty(
+    result: BuildIndexResult, *, allow_empty_benchmarks: bool = False
+) -> list[str]:
+    """Raise :class:`EmptyBenchmarkError` if a benchmark would be indexed empty.
+
+    With ``allow_empty_benchmarks`` the problems are returned instead, for the
+    caller to report as warnings.
+    """
+    problems = empty_benchmark_problems(result)
+    if problems and not allow_empty_benchmarks:
+        lines = "\n".join(f"  - {p}" for p in problems)
+        raise EmptyBenchmarkError(
+            f"{len(problems)} benchmark(s) would be indexed empty:\n{lines}\n"
+            "No index was written. Fix the config, or pass --allow-empty-benchmarks "
+            "to build the index anyway."
+        )
+    return problems
 
 
 def build_eval_item_tokens(
@@ -237,6 +363,7 @@ def write_native_index_artifacts(result: BuildIndexResult, out_path: str) -> Non
             "native": Path(out_path).name,
             "attr": f"{Path(out_path).name}.attr",
         },
+        "benchmark_stats": [b.to_meta() for b in result.benchmark_stats],
     }
 
     has_items = result.attribution.has_items()
@@ -265,12 +392,37 @@ def build_index_hf(cfg: BuildIndexConfig) -> None:
             )
     # Create the output directory before the (possibly long) benchmark download.
     Path(cfg.out_path).parent.mkdir(parents=True, exist_ok=True)
-    result = build_index(benchmarks=cfg.benchmarks, ngram=cfg.ngram)
+    result = build_index(
+        benchmarks=cfg.benchmarks, ngram=cfg.ngram, min_hits=cfg.min_hits
+    )
+    # Checked before anything is written, so a failed build leaves no index behind.
+    problems = check_benchmarks_not_empty(
+        result, allow_empty_benchmarks=cfg.allow_empty_benchmarks
+    )
     write_native_index_artifacts(result, cfg.out_path)
-    _report_build_stats(result)
+    _report_build_stats(result, problems=problems)
 
 
-def _report_build_stats(result: BuildIndexResult) -> None:
+def _report_benchmark_table(result: BuildIndexResult) -> None:
+    if not result.benchmark_stats:
+        return
+    min_hits = result.benchmark_stats[0].min_hits
+    rows = [
+        (
+            b.name,
+            f"{b.items:,}",
+            f"{b.ngrams:,}",
+            f"{b.items_zero_ngrams:,}",
+            f"{b.items_below_min_hits:,}",
+        )
+        for b in result.benchmark_stats
+    ]
+    print(format_benchmark_table(rows, min_hits=min_hits, indent="  "))
+
+
+def _report_build_stats(
+    result: BuildIndexResult, *, problems: list[str] | None = None
+) -> None:
     config = _load_ngram_config()
     patterns = config.get("ngram_reject_patterns", [])
     counts = [
@@ -279,18 +431,22 @@ def _report_build_stats(result: BuildIndexResult) -> None:
     counts.sort(key=lambda item: item[1], reverse=True)
     top_counts = counts[:10]
 
-    print("[build-index] N-gram stats:")
-    empty = [
-        str(spec["name"])
-        for spec in result.benchmark_specs
-        if spec["name"] not in result.attribution.name_to_id
-    ]
-    if empty:
+    print("[build-index] Benchmarks:")
+    _report_benchmark_table(result)
+    unflaggable = sum(b.items_below_min_hits for b in result.benchmark_stats)
+    if unflaggable:
+        min_hits = result.benchmark_stats[0].min_hits
         print(
-            f"  WARNING: no n-grams indexed for: {', '.join(empty)}. Their item fields "
-            f"may be shorter than ngram={result.ngram} tokens (n-grams never cross "
-            "fields), or every n-gram was rejected or subtracted."
+            f"  {unflaggable:,} item(s) have fewer than min_hits={min_hits} n-grams; "
+            "the n-gram rule cannot flag them."
         )
+    for message in problems or []:
+        print(f"  WARNING (--allow-empty-benchmarks): {message}")
+    for bstats in result.benchmark_stats:
+        for warning in bstats.warnings:
+            print(f"  WARNING: {warning}")
+
+    print("[build-index] N-gram stats:")
     print(f"  total candidate n-grams: {result.stats.total_candidate_ngrams:,}")
     print(f"  retained after filtering: {result.stats.retained_after_filtering:,}")
     if top_counts:

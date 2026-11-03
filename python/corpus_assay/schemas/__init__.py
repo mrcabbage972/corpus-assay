@@ -1,5 +1,9 @@
 from corpus_assay.schemas.doc_result import DOC_RESULT_SCHEMA_VERSION, DocResult
-from corpus_assay.schemas.index_meta import INDEX_META_SCHEMA_VERSION, IndexMeta
+from corpus_assay.schemas.index_meta import (
+    INDEX_META_SCHEMA_VERSION,
+    BenchmarkStats,
+    IndexMeta,
+)
 from corpus_assay.schemas.run_manifest import (
     RUN_MANIFEST_SCHEMA_VERSION,
     RunHFDatasetInput,
@@ -23,6 +27,7 @@ from corpus_assay.schemas.stopgrams_meta import (
 )
 
 __all__ = [
+    "BenchmarkStats",
     "DOC_RESULT_SCHEMA_VERSION",
     "DocResult",
     "STOPGRAMS_META_SCHEMA_VERSION",

@@ -281,3 +281,121 @@ def test_stopgrams_from_local_background(
     summary = _summary(out)
     assert summary["failed_files"] == 0
     assert summary["total_contaminated"] == 2
+
+
+def _benchmark_config(tmp_path: Path, name: str, benchmarks: list[dict]) -> Path:
+    path = tmp_path / f"{name}.yaml"
+    path.write_text(
+        yaml.safe_dump({"benchmarks": benchmarks, "ngram": 13, "min_hits": 3}),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_build_index_fails_on_a_benchmark_that_loads_nothing(
+    tmp_path: Path, config: Path, env: dict[str, str]
+) -> None:
+    good = yaml.safe_load(config.read_text(encoding="utf-8"))["benchmarks"][0]
+    missing = {
+        "name": "Gone",
+        "dataset": "json",
+        "data_files": {"test": (tmp_path / "missing.jsonl").as_posix()},
+        "splits": ["test"],
+        "fields": ["question"],
+    }
+    cfg = _benchmark_config(tmp_path, "missing", [good, missing])
+    out = tmp_path / "idx" / "index.native"
+    args = ["build-index", "--config", str(cfg), "--out-index", str(out)]
+
+    proc = _cli(*args, "--allow-unpinned", env=env, ok=False)
+    assert proc.returncode == 1
+    assert "Gone (json): loaded no rows" in proc.stderr
+    assert "--allow-empty-benchmarks" in proc.stderr
+    assert not list(out.parent.glob("index.native*")), "nothing must be written"
+
+    proc = _cli(*args, "--allow-unpinned", "--allow-empty-benchmarks", env=env)
+    assert out.exists()
+    assert "WARNING (--allow-empty-benchmarks): Gone (json)" in proc.stdout
+    meta = json.loads(out.with_name(out.name + ".meta.json").read_text("utf-8"))
+    assert meta["schema_version"] == 2
+    stats = {s["name"]: s for s in meta["benchmark_stats"]}
+    assert stats["Gone"]["items"] == 0
+    assert stats["TinyQA"]["items"] == 3
+    assert stats["TinyQA"]["ngrams"] > 0
+
+
+def test_build_index_fails_on_a_benchmark_with_no_ngrams(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    items = tmp_path / "short.jsonl"
+    items.write_text(json.dumps({"q": "two words"}) + "\n", encoding="utf-8")
+    cfg = _benchmark_config(
+        tmp_path,
+        "short",
+        [
+            {
+                "name": "Tiny",
+                "dataset": "json",
+                "data_files": {"test": items.as_posix()},
+                "splits": ["test"],
+                "fields": ["q"],
+            }
+        ],
+    )
+    out = tmp_path / "index.native"
+    proc = _cli(
+        "build-index", "--config", str(cfg), "--out-index", str(out),
+        "--allow-unpinned",
+        env=env, ok=False,
+    )  # fmt: skip
+    assert proc.returncode == 1
+    assert "Tiny (json): loaded 1 items but indexed no n-grams" in proc.stderr
+    assert not out.exists()
+
+
+def test_inspect_index_lists_benchmark_counts(
+    tmp_path: Path, config: Path, index: Path, env: dict[str, str]
+) -> None:
+    proc = _cli("inspect-index", "--index", str(index), env=env)
+    assert "meta schema_version: 2" in proc.stdout
+    row = next(
+        line.split()
+        for line in proc.stdout.splitlines()
+        if line.strip().startswith("TinyQA")
+    )
+    # benchmark, items, n-grams, 0 n-grams, < min_hits
+    assert row[1] == "3" and int(row[2].replace(",", "")) > 0
+    assert row[3:] == ["0", "0"]
+    assert "unflaggable items: 0 with 0 n-grams" in proc.stdout
+
+
+def test_build_index_warns_about_hidden_labels(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    items = tmp_path / "hidden.jsonl"
+    rows = [{"question": f"{ITEMS[i]['question']}", "label": -1} for i in range(2)]
+    items.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    cfg = _benchmark_config(
+        tmp_path,
+        "hidden",
+        [
+            {
+                "name": "Hidden",
+                "dataset": "json",
+                "data_files": {"test": items.as_posix()},
+                "splits": ["test"],
+                "fields": ["question"],
+                "label_field": "label",
+            }
+        ],
+    )
+    out = tmp_path / "index.native"
+    proc = _cli(
+        "build-index", "--config", str(cfg), "--out-index", str(out),
+        "--allow-unpinned",
+        env=env,
+    )  # fmt: skip
+    assert "every 'label' value in split 'test' is missing, empty or -1" in (
+        proc.stdout
+    )
+    assert out.exists()

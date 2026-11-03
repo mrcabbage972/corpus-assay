@@ -38,12 +38,19 @@ class BenchmarkSpec(BaseModel):
 
     trust_remote_code: bool = False
 
+    # Optional label/answer column, used only to check that the indexed splits have
+    # public labels (a split whose labels are all missing is usually not the one
+    # evaluation harnesses score). Never indexed.
+    label_field: str | None = None
+
     @model_validator(mode="after")
     def _validate_config_fields(self) -> "BenchmarkSpec":
         if self.config_name is not None and not self.config_name.strip():
             raise ValueError("config_name must be a non-empty string when provided")
         if self.config_name and self.configs:
             raise ValueError("Use either config_name or configs, not both")
+        if self.label_field is not None and not self.label_field.strip():
+            raise ValueError("label_field must be a non-empty string when provided")
         return self
 
     @field_validator("splits")

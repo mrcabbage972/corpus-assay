@@ -532,3 +532,168 @@ def test_scan_dry_run_fails_when_index_missing_sidecars(
     # Ensure dry-run failure doesn't accidentally run the scan pipeline.
     assert len(patch_scan_pipeline["do_scan"]) == 0
     assert len(patch_scan_pipeline["write_run_outputs"]) == 0
+
+
+# ----------------------------
+# Tests: empty benchmarks, registry commands, inspect-index
+# ----------------------------
+
+
+def test_build_index_threads_allow_empty_and_min_hits(
+    tmp_path: Path,
+    tmp_cfg_file: Path,
+    patch_config_loader: None,
+    patch_index_build: dict[str, Any],
+) -> None:
+    base = ["build-index", "--out-index", str(tmp_path / "i.native")]
+    base += ["--config", str(tmp_cfg_file), "--allow-unpinned"]
+    assert runner.invoke(cli.app, base).exit_code == 0
+    assert runner.invoke(cli.app, [*base, "--allow-empty-benchmarks"]).exit_code == 0
+    default, allowed = patch_index_build["build_index_hf"]
+    assert default.allow_empty_benchmarks is False
+    assert allowed.allow_empty_benchmarks is True
+    assert default.min_hits == 3
+
+
+def test_build_index_empty_benchmark_exits_nonzero(
+    tmp_path: Path,
+    tmp_cfg_file: Path,
+    patch_config_loader: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from corpus_assay.indexing import EmptyBenchmarkError
+
+    def fail(_cfg: Any) -> None:
+        raise EmptyBenchmarkError("1 benchmark(s) would be indexed empty: MMLU")
+
+    monkeypatch.setattr(cli, "build_index_hf", fail)
+    result = runner.invoke(
+        cli.app,
+        ["build-index", "--out-index", str(tmp_path / "i.native")]
+        + ["--config", str(tmp_cfg_file), "--allow-unpinned"],
+    )
+    assert result.exit_code == 1
+    assert "[build-index] ERROR: 1 benchmark(s) would be indexed empty" in (
+        result.output
+    )
+    assert "Traceback" not in result.output
+
+
+@pytest.mark.parametrize("flag", [[], ["--allow-empty-benchmarks"]])
+def test_run_threads_allow_empty_benchmarks(
+    tmp_path: Path,
+    tmp_cfg_file: Path,
+    patch_config_loader: None,
+    patch_scan_pipeline: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    flag: list[str],
+) -> None:
+    native = tmp_path / "index.native"
+    seen: list[dict[str, Any]] = []
+
+    def fake_ensure(_cfg_path: Path, _cache_dir: Path, **kwargs: Any) -> Path:
+        seen.append(kwargs)
+        return native
+
+    monkeypatch.setattr(cli, "_ensure_native_index", fake_ensure)
+    result = runner.invoke(
+        cli.app,
+        ["run", "--config", str(tmp_cfg_file), "--input", str(tmp_path / "*.parquet")]
+        + ["--out-dir", str(tmp_path / "out"), "--allow-unpinned", *flag],
+    )
+    assert result.exit_code == 0, result.output
+    assert seen[0]["allow_empty_benchmarks"] is bool(flag)
+
+
+def test_describe_benchmark_prints_spec_and_metadata() -> None:
+    import yaml
+
+    result = runner.invoke(cli.app, ["describe-benchmark", "commonsenseqa"])
+    assert result.exit_code == 0, result.output
+    # Still a valid spec when pasted into a config: the metadata is comments.
+    spec = yaml.safe_load(result.output)
+    assert spec["splits"] == ["validation"]
+    assert spec["revision"]
+    assert "# Registry metadata" in result.output
+    assert "scored split: validation" in result.output
+    assert "1,161 of 1,221 (95%) have fewer than 3 13-grams" in result.output
+    assert "the n-gram rule cannot flag them" in result.output
+    assert "lower bound" in result.output
+
+    gated = runner.invoke(cli.app, ["describe-benchmark", "gpqa_diamond"]).output
+    assert "gated: yes" in gated
+    assert "short items: not measured" in gated
+    lambada = runner.invoke(cli.app, ["describe-benchmark", "lambada"]).output
+    assert "lower bound" not in lambada
+
+
+def test_init_config_output_passes_revision_pin_check(tmp_path: Path) -> None:
+    out = tmp_path / "config.yaml"
+    result = runner.invoke(
+        cli.app,
+        ["init-config", "--out", str(out), "--benchmarks", "mmlu"]
+        + ["--benchmarks", "hellaswag", "--benchmarks", "aime25"],
+    )
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(cli.app, ["validate-config", "--config", str(out)])
+    assert result.exit_code == 0, result.output
+    assert "Config OK." in result.output
+
+
+def test_inspect_index_tolerates_v1_meta_and_reads_sidecars(tmp_path: Path) -> None:
+    """An index from before benchmark_stats: counts come from the sidecars."""
+    import json
+
+    from corpus_assay.attribution import AttributionIndex
+    from corpus_assay.indexing import (
+        BuildIndexResult,
+        BuildIndexStats,
+        write_native_index_artifacts,
+    )
+
+    attribution = AttributionIndex()
+    for item_hashes in ([1, 2, 3], [3], []):
+        idx = attribution.register_item("Old")
+        for h in item_hashes:
+            attribution.add_hash_for_source(h, "Old")
+            attribution.add_hash_for_item(h, idx)
+    path = tmp_path / "old.native"
+    write_native_index_artifacts(
+        BuildIndexResult(
+            ngram=13,
+            hashes={1, 2, 3},
+            attribution=attribution,
+            stats=BuildIndexStats(),
+            benchmark_specs=[{"name": "Old"}, {"name": "Lost"}],
+            dataset_fingerprints=[],
+        ),
+        str(path),
+    )
+    meta_path = tmp_path / "old.native.meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["schema_version"] = 1
+    del meta["benchmark_stats"]
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    result = runner.invoke(cli.app, ["inspect-index", "--index", str(path)])
+    assert result.exit_code == 0, result.output
+    rows = {
+        line.split()[0]: line.split()
+        for line in result.output.splitlines()
+        if line.strip().split()[:1] in (["Old"], ["Lost"])
+    }
+    # benchmark, items, n-grams, 0 n-grams, < 3 n-grams
+    assert rows["Old"] == ["Old", "3", "3", "1", "2"]
+    assert rows["Lost"] == ["Lost", "0", "0", "0", "0"]
+    assert "unflaggable items: 1 with 0 n-grams, 2 with fewer than min_hits=3" in (
+        result.output
+    )
+    assert "WARNING: benchmarks indexed empty: Lost" in result.output
+
+    # Without the per-item sidecar, item counts are unknown but n-grams are not.
+    (tmp_path / "old.native.items.meta.json").unlink()
+    result = runner.invoke(cli.app, ["inspect-index", "--index", str(path)])
+    assert result.exit_code == 0, result.output
+    old = next(line.split() for line in result.output.splitlines() if "Old" in line)
+    assert old == ["Old", "?", "3", "?", "?"]
+    assert "unflaggable items: unknown" in result.output

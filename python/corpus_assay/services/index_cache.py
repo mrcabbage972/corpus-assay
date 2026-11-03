@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+from collections.abc import Iterable
 from pathlib import Path
 
 from corpus_assay._version import dist_version
+from corpus_assay.benchmark_spec import BenchmarkSpec
 from corpus_assay.config import BuildIndexConfig, load_decontamination_config
 from corpus_assay.indexing import build_index_hf
 from corpus_assay.normalization import active_ngram_config_path
@@ -51,21 +55,52 @@ def native_index_ready(native_path: Path) -> bool:
     return all(path.exists() for path in required)
 
 
-def index_cache_path(config_path: Path, cache_dir: Path) -> Path:
+def benchmark_specs_hash(benchmarks: Iterable[BenchmarkSpec]) -> str:
+    """SHA-256 of the resolved benchmark specs (sorted-keys JSON, in config order)."""
+    payload = json.dumps(
+        [spec.model_dump(mode="json") for spec in benchmarks],
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def index_cache_path(
+    config_path: Path,
+    cache_dir: Path,
+    *,
+    benchmarks: Iterable[BenchmarkSpec] | None = None,
+) -> Path:
+    """Cache path for the index a config builds.
+
+    Keyed on the config file, the resolved benchmark specs, the normalization config
+    and the library version. The specs are hashed after registry refs are resolved,
+    so a registry change (same config text, different specs) builds a new index
+    instead of reusing a stale one. ``benchmarks`` defaults to loading the config.
+    """
     config_hash = _file_sha256(config_path)
+    if benchmarks is None:
+        benchmarks = load_decontamination_config(config_path).benchmarks
+    specs_hash = benchmark_specs_hash(benchmarks)[:16]
     norm_path = normalization_config_path()
     norm_hash = _file_sha256(norm_path)
     if norm_hash is None:
         raise FileNotFoundError(f"Could not read normalization config at {norm_path}")
-    return cache_dir / f"index_{config_hash}_{norm_hash}_{_library_identifier()}.native"
+    return cache_dir / (
+        f"index_{config_hash}_{specs_hash}_{norm_hash}_{_library_identifier()}.native"
+    )
 
 
 def ensure_native_index(
-    cfg_path: Path, cache_dir: Path, *, allow_unpinned: bool = False
+    cfg_path: Path,
+    cache_dir: Path,
+    *,
+    allow_unpinned: bool = False,
+    allow_empty_benchmarks: bool = False,
 ) -> Path:
     cache_dir.mkdir(parents=True, exist_ok=True)
-    native_path = index_cache_path(cfg_path, cache_dir)
     cfg = load_decontamination_config(cfg_path)
+    native_path = index_cache_path(cfg_path, cache_dir, benchmarks=cfg.benchmarks)
     if not allow_unpinned:
         missing = [spec.name for spec in cfg.benchmarks if not spec.revision]
         if missing:
@@ -85,6 +120,8 @@ def ensure_native_index(
             ngram=cfg.ngram,
             benchmarks=cfg.benchmarks,
             allow_unpinned=allow_unpinned,
+            allow_empty_benchmarks=allow_empty_benchmarks,
+            min_hits=cfg.min_hits,
         )
     )
     logger.info("Wrote native index to: %s", native_path)

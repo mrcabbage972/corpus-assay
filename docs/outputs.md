@@ -11,7 +11,14 @@ All binary files are little-endian. Every JSON sidecar carries a `schema_version
 | `<index>.native.items` | Header (type 4) + per hash: `<u64 hash, u32 n, n × u32 item_idx>` |
 | `<index>.native.items.meta.json` | Item table: `(benchmark, item_id, n_protected_hashes)` per item index |
 | `<index>.native.sources.json` | Benchmark legend: `id_to_name`, `name_to_id`, per-benchmark hash totals |
-| `<index>.native.meta.json` | Provenance: tool versions, `ngram`, normalization config hash/SHA, hash function, benchmark specs, HF dataset fingerprints and resolved revisions |
+| `<index>.native.meta.json` | Provenance: tool versions, `ngram`, normalization config hash/SHA, hash function, benchmark specs, HF dataset fingerprints and resolved revisions, and per-benchmark counts (`benchmark_stats`) |
+
+`.meta.json` is at `schema_version` 2. Version 2 adds `benchmark_stats`, one entry per
+benchmark: `name`, `items`, `ngrams` (distinct hashes attributed to it),
+`items_zero_ngrams`, `items_below_min_hits` (items with fewer than `min_hits` n-grams,
+those with none included) and the `min_hits` used. Version 1 files have no
+`benchmark_stats` and still load; `inspect-index` then derives what it can from
+`.sources.json` and `.items.meta.json`.
 
 Bit `i` of a benchmark mask is set when the n-gram occurs in benchmark `id_to_name[i]`.
 

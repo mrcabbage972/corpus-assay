@@ -135,6 +135,10 @@ class BuildIndexConfig(BaseModel):
     ngram: int
     benchmarks: list[BenchmarkSpec] = Field(..., min_length=1)
     allow_unpinned: bool = False
+    # Build even when a benchmark loads no rows or indexes no n-grams.
+    allow_empty_benchmarks: bool = False
+    # Only used to count the items with fewer than min_hits n-grams.
+    min_hits: int = Field(default=3, gt=0)
 
     @field_validator("benchmarks")
     @classmethod

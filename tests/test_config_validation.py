@@ -16,9 +16,15 @@ class _FakeInfo:
         return self._splits
 
 
+class _FakeBuilderConfig:
+    def __init__(self, data_files) -> None:
+        self.data_files = data_files
+
+
 class _FakeBuilder:
-    def __init__(self, splits) -> None:
+    def __init__(self, splits, *, config_data_files=None) -> None:
         self._info = _FakeInfo(splits)
+        self.config = _FakeBuilderConfig(config_data_files)
 
     @property
     def info(self):
@@ -207,3 +213,123 @@ def test_remote_check_omits_trust_remote_code_unless_requested(tmp_path) -> None
     assert "trust_remote_code" not in seen["demo/plain"]
     assert seen["demo/scripted"]["trust_remote_code"] is True
     assert (report.remote_checked, report.remote_skipped) == (2, 0)
+
+
+def _one_benchmark(tmp_path, **spec) -> str:
+    return _write_config(
+        tmp_path,
+        {
+            "benchmarks": [
+                {"name": "Demo", "dataset": "demo/ds", "fields": ["q"], **spec}
+            ]
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    ("data_files", "splits"),
+    [
+        ({"test": ["a.jsonl", "b.jsonl"]}, ["test"]),
+        ("all.jsonl", ["train"]),
+        (["a.jsonl", "b.jsonl"], ["train"]),
+    ],
+)
+def test_remote_check_falls_back_to_data_files_splits(
+    tmp_path, data_files, splits
+) -> None:
+    """A dataset with no split metadata (e.g. opencompass/AIME2025) validates from
+    its data_files keys instead of failing with 'Available: []'."""
+    config_path = _one_benchmark(tmp_path, data_files=data_files, splits=splits)
+    validator = ConfigValidator(
+        dataset_builder_loader=lambda *_a, **_k: _FakeBuilder({}),
+        benchmark_loader_factory=_SingleConfigBenchmarkLoader,
+    )
+    report = validator.validate(config_path, check_remote=True, allow_unpinned=True)
+    assert (report.remote_checked, report.remote_skipped) == (1, 0)
+
+
+def test_remote_check_data_files_fallback_still_rejects_unknown_split(
+    tmp_path,
+) -> None:
+    config_path = _one_benchmark(
+        tmp_path, data_files={"test": "t.jsonl"}, splits=["validation"]
+    )
+    validator = ConfigValidator(
+        dataset_builder_loader=lambda *_a, **_k: _FakeBuilder({}),
+        benchmark_loader_factory=_SingleConfigBenchmarkLoader,
+    )
+    with pytest.raises(typer.BadParameter, match=r"Available: \['test'\]"):
+        validator.validate(config_path, check_remote=True, allow_unpinned=True)
+
+
+def test_remote_check_uses_builder_data_files_when_spec_has_none(tmp_path) -> None:
+    config_path = _one_benchmark(tmp_path, splits=["test"])
+    validator = ConfigValidator(
+        dataset_builder_loader=lambda *_a, **_k: _FakeBuilder(
+            {}, config_data_files={"test": ["hf://x/test.jsonl"]}
+        ),
+        benchmark_loader_factory=_SingleConfigBenchmarkLoader,
+    )
+    report = validator.validate(config_path, check_remote=True, allow_unpinned=True)
+    assert report.remote_checked == 1
+
+
+def test_remote_check_warns_about_hidden_labels(tmp_path) -> None:
+    config_path = _write_config(
+        tmp_path,
+        {
+            "benchmarks": [
+                # A registry entry pointed at its test split: labels are hidden.
+                {"ref": "hellaswag", "splits": ["test"]},
+                {
+                    "name": "Public",
+                    "dataset": "demo/public",
+                    "splits": ["test"],
+                    "fields": ["q"],
+                    "label_field": "answer",
+                },
+                {
+                    "name": "NoLabel",
+                    "dataset": "demo/x",
+                    "splits": ["test"],
+                    "fields": ["q"],
+                },
+            ]
+        },
+    )
+    probed: list[tuple[str, str | None, str]] = []
+
+    def fake_probe(spec, config_name, split):
+        probed.append((spec.name, config_name, split))
+        return ["", ""] if spec.name == "HellaSwag" else ["A", "B"]
+
+    validator = ConfigValidator(
+        dataset_builder_loader=lambda *_a, **_k: _FakeBuilder({"test": object()}),
+        benchmark_loader_factory=_SingleConfigBenchmarkLoader,
+        label_probe=fake_probe,
+    )
+    report = validator.validate(config_path, check_remote=True, allow_unpinned=True)
+
+    # Only specs with a label_field are probed.
+    assert probed == [("HellaSwag", None, "test"), ("Public", None, "test")]
+    (warning,) = report.warnings
+    assert warning.startswith("[warn] HellaSwag: every 'label' value in split 'test'")
+    assert "Harnesses score the 'validation' split of Rowan/hellaswag" in warning
+    assert (report.remote_checked, report.remote_skipped) == (3, 0)
+
+
+def test_remote_check_label_probe_failure_is_a_warning(tmp_path) -> None:
+    config_path = _one_benchmark(tmp_path, splits=["test"], label_field="answer")
+
+    def failing_probe(*_args):
+        raise RuntimeError("no streaming")
+
+    validator = ConfigValidator(
+        dataset_builder_loader=lambda *_a, **_k: _FakeBuilder({"test": object()}),
+        benchmark_loader_factory=_SingleConfigBenchmarkLoader,
+        label_probe=failing_probe,
+    )
+    report = validator.validate(config_path, check_remote=True, allow_unpinned=True)
+    (warning,) = report.warnings
+    assert "could not read 'answer'" in warning and "no streaming" in warning
+    assert report.remote_checked == 1

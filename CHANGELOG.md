@@ -6,6 +6,60 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `build-index` fails, writing nothing, when a configured benchmark loads no rows or
+  indexes no n-grams (#5). The error names each such benchmark and the reason (the load
+  error, a missing split, or fields too short for `ngram`). For a gated dataset it says
+  to log in with `hf auth login` and accept the dataset terms. `--allow-empty-benchmarks`
+  builds the index anyway, on `build-index`, `run` and `run-hf`.
+- Per-benchmark counts in the index metadata (`benchmark_stats`: items, n-grams, items
+  with no n-grams, items with fewer than `min_hits` n-grams). `build-index` ends with a
+  table of them, and `inspect-index` prints them with the number of items the n-gram rule
+  cannot flag (`--min-hits` recounts against another threshold). For older indexes,
+  `inspect-index` derives the counts from `.sources.json` and `.items.meta.json`.
+- Hidden-label check (#6): a new optional spec key, `label_field`, names the label
+  column (never indexed). `build-index` and `validate-config --check-remote` warn when
+  every value of it in an indexed split is missing, `""` or `-1`, and name the split
+  harnesses score when the dataset is in the registry.
+- Registry entries (#14): `aime24`, `aime25`, `amc23`, `math500`, `gsm8k_solutions`,
+  `jeebench`, `gpqa_diamond`, `humaneval`, `mbpp`, `livecodebench`, `ifeval`,
+  `commonsenseqa`, `arc_challenge`, `arc_easy`, `piqa`. Each entry carries metadata: the
+  split harnesses score, whether the dataset is gated, the share of items with fewer than
+  3 13-grams, and notes. `describe-benchmark` prints it after the spec, as YAML comments.
+
+### Changed
+
+- **Index metadata schema version 2.** `<index>.native.meta.json` gains
+  `benchmark_stats`, and its `benchmark_specs` entries gain `label_field`.
+  `INDEX_META_SCHEMA_VERSION` goes from 1 to 2. Version 1 files still load. The binary
+  index formats and hashes are unchanged, so existing indexes keep their meaning.
+- **Registry entries changed in place.** A config that names these keys now indexes
+  different text, so rebuild indexes built from them:
+  - `mmlu`: the `all` config instead of every subject config, fields `question, choices`
+    (`answer` dropped).
+  - `hellaswag`: the `validation` split (test labels are hidden) instead of `test`,
+    fields `ctx, endings` (`label` dropped).
+  - `arc`: still both ARC configs, fields `question, choices` (`answerKey` dropped).
+    The new `arc_challenge` and `arc_easy` index them separately.
+  - `gsm8k`: the `question` only. The worked solutions moved to `gsm8k_solutions`.
+  - `boolq`: `aps/super_glue` (config `boolq`) instead of `google/boolq`.
+  - `copa`: fields `premise, choice1, choice2` (`question` dropped).
+  - `lambada`: the `default` config, named explicitly.
+- Every registry entry is pinned to a Hub commit, so configs written by `init-config`
+  pass the revision-pin check without `--allow-unpinned`.
+
+### Fixed
+
+- The `run`/`run-hf` index cache was keyed on the config file's text, so a config
+  naming registry keys reused an index built from the old registry entries after the
+  registry changed. The key now also hashes the resolved benchmark specs. Existing
+  cached indexes are rebuilt once.
+
+- `validate-config --check-remote` rejected datasets whose card lists no splits even
+  though their `data_files` load (for example `opencompass/AIME2025`: "splits not found
+  ... Available: []"). It now takes the split names from the `data_files` keys.
+
 ## [0.1.0] - 2026-10-03
 
 Initial public release.

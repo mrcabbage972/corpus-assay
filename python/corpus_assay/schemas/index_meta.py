@@ -4,7 +4,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-INDEX_META_SCHEMA_VERSION = 1
+# v2 adds ``benchmark_stats``. v1 files (no stats) still load.
+INDEX_META_SCHEMA_VERSION = 2
 
 
 class HashFunctionMetadata(BaseModel):
@@ -12,6 +13,24 @@ class HashFunctionMetadata(BaseModel):
 
     name: str
     version: str
+
+
+class BenchmarkStats(BaseModel):
+    """Per-benchmark counts recorded at build time (schema v2)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    # Protected items (rows of the indexed splits).
+    items: int
+    # Distinct n-gram hashes attributed to the benchmark (after subtraction).
+    ngrams: int
+    # Items the n-gram rule cannot flag: no n-grams at all, and fewer than
+    # ``min_hits`` n-grams (a superset of the first).
+    items_zero_ngrams: int = 0
+    items_below_min_hits: int = 0
+    # The min_hits the previous count was measured against.
+    min_hits: int | None = None
 
 
 class IndexMeta(BaseModel):
@@ -32,3 +51,4 @@ class IndexMeta(BaseModel):
     benchmark_specs: list[dict[str, Any]] = Field(default_factory=list)
     hf_datasets: list[dict[str, Any]] = Field(default_factory=list)
     files: dict[str, Any] | None = None
+    benchmark_stats: list[BenchmarkStats] = Field(default_factory=list)
