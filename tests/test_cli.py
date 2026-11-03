@@ -51,6 +51,9 @@ def fake_decon_cfg() -> Any:
         min_hits=3,
         min_coverage=0.001,
         min_item_coverage=0.0,
+        exact_channel="off",
+        exact_min_chars=12,
+        confirm=False,
         background=None,
         stopgrams=None,
         spaced=None,
@@ -650,12 +653,14 @@ def test_describe_benchmark_prints_spec_and_metadata() -> None:
     assert "1,161 of 1,221 (95%) have fewer than 3 13-grams" in result.output
     assert "the n-gram rule cannot flag them" in result.output
     assert "lower bound" in result.output
+    assert "--exact-channel short" in result.output
 
     gated = runner.invoke(cli.app, ["describe-benchmark", "gpqa_diamond"]).output
     assert "gated: yes" in gated
     assert "short items: not measured" in gated
     lambada = runner.invoke(cli.app, ["describe-benchmark", "lambada"]).output
     assert "lower bound" not in lambada
+    assert "--exact-channel" not in lambada
 
 
 def test_init_config_output_passes_revision_pin_check(tmp_path: Path) -> None:

@@ -98,6 +98,7 @@ def test_manifest_records_text_keys_and_messages_key(tmp_path: Path) -> None:
         total_contaminated=0,
         contamination_rate=0.0,
         total_empty_after_filter=0,
+        total_contaminated_by_channel={},
         failed_files=0,
         total_files=0,
         per_file=[],

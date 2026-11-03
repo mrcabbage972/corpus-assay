@@ -10,6 +10,7 @@ from corpus_assay._version import dist_version
 from corpus_assay.attribution import ITEMS_FORMAT_VERSION, AttributionIndex
 from corpus_assay.benchmark_spec import BenchmarkSpec
 from corpus_assay.config import BuildIndexConfig, load_decontamination_config
+from corpus_assay.constants import ITEMS_TEXT_SUFFIX
 from corpus_assay.indexing import build_index_hf
 from corpus_assay.normalization import active_ngram_config_path
 from corpus_assay.scanner.fingerprint import _file_sha256
@@ -49,14 +50,18 @@ def native_index_required_paths(
         # require it — there, auto degrades to union for legacy indexes.)
         paths.append(native_sidecar(native_path, ".items"))
         paths.append(native_sidecar(native_path, ".items.meta.json"))
+        # The raw item text, for the exact-match channel and --confirm; caches
+        # built before it existed are rebuilt.
+        paths.append(native_sidecar(native_path, ITEMS_TEXT_SUFFIX))
     return paths
 
 
 def native_index_ready(native_path: Path) -> bool:
     """Whether a cached index is complete and current.
 
-    A cache whose ``.items`` predates field masks (format v1) is rebuilt, so
-    ``run`` / ``run-hf`` records report which item fields matched.
+    A cache whose ``.items`` predates field masks (format v1), or that lacks
+    the item text sidecar, is rebuilt, so ``run`` / ``run-hf`` records report
+    which item fields matched and the exact channel and ``--confirm`` work.
     """
     required = native_index_required_paths(native_path, require_items=True)
     if not all(path.exists() for path in required):

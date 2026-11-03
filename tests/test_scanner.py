@@ -68,6 +68,9 @@ def cfg(workdir: Path) -> Any:
                 "min_longest_run": self.min_longest_run,
                 "boilerplate_threshold": self.boilerplate_threshold,
                 "min_item_coverage": self.min_item_coverage,
+                "exact_channel": self.exact_channel,
+                "exact_min_chars": self.exact_min_chars,
+                "confirm": self.confirm,
             }
 
     return Cfg(
@@ -98,6 +101,9 @@ def cfg(workdir: Path) -> Any:
         min_longest_run=0,
         boilerplate_threshold=50,
         min_item_coverage=0.0,
+        exact_channel="off",
+        exact_min_chars=12,
+        confirm=False,
     )
 
 
@@ -182,6 +188,10 @@ def patch_rust_scanner(monkeypatch: pytest.MonkeyPatch) -> None:
         messages_key: str | None = None,
         min_item_coverage: float = 0.0,
         out_item_best_path: str | None = None,
+        exact_channel: str = "off",
+        exact_min_chars: int = 12,
+        confirm: bool = False,
+        channel_counts: dict[str, int] | None = None,
     ):
         # distinguish shards by stem (the hits path embeds it; JSONL input arrives
         # as an in-memory Parquet buffer without a file name)

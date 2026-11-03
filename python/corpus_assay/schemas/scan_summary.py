@@ -18,6 +18,9 @@ class ScanSummaryOutput(BaseModel):
     contam_rate: float = 0.0
     empty_after_filter: int = 0
     per_source: dict[str, dict[str, int]] = Field(default_factory=dict)
+    # Flagged sub-documents per enabled channel (ngram, spaced, exact). Optional:
+    # absent from summaries written before it existed.
+    contaminated_by_channel: dict[str, int] = Field(default_factory=dict)
     error: str | None = None
     run_fingerprint: dict[str, Any] | None = None
 
@@ -31,5 +34,7 @@ class FinalSummaryOutput(BaseModel):
     total_contaminated: int
     contamination_rate: float
     total_empty_after_filter: int = 0
+    # Flagged sub-documents per channel over the ok shards (optional).
+    total_contaminated_by_channel: dict[str, int] = Field(default_factory=dict)
     failed_files: int
     total_files: int

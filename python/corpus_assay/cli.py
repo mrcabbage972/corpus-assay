@@ -23,6 +23,7 @@ from corpus_assay.config import (
     DEFAULT_PACKED_DOC_SEP,
     BuildIndexConfig,
     DecontaminationConfig,
+    ExactChannel,
     ItemStopGramsConfig,
     ScanConfig,
     SpacedSeedsConfig,
@@ -34,6 +35,7 @@ from corpus_assay.inspect import format_benchmark_table, inspect_index, inspect_
 from corpus_assay.reporting import generate_report_from_scan_dir
 from corpus_assay.scanner import OutputLayout, do_scan, write_run_outputs
 from corpus_assay.scanner.fingerprint import _file_sha256, library_version
+from corpus_assay.scanner.runner import check_item_text_sidecar
 from corpus_assay.schemas import RunManifest
 from corpus_assay.services.config_validation import ConfigValidator
 from corpus_assay.services.hf_parquet import (
@@ -91,6 +93,25 @@ _MIN_ITEM_COVERAGE_HELP = (
     "flags such a document whatever its document coverage, so a long document "
     "holding a whole item is caught; with --gate-mode item it is an extra "
     "requirement on the flagging item. 0 turns it off. Needs the .items sidecar."
+)
+_EXACT_CHANNEL_HELP = (
+    "Exact-match channel: off, short (items with fewer than min_hits n-grams, "
+    "which the n-gram rule cannot flag) or all (every item). Matches each item's "
+    "question (its first field) verbatim after light normalization (Unicode NFKC, "
+    "lowercase, whitespace collapsed; numbers, operators and stop words kept), on "
+    "word boundaries; a match flags the document. Needs the index's "
+    ".items.text.jsonl sidecar."
+)
+_EXACT_MIN_CHARS_HELP = (
+    "Shortest question, in characters after light normalization, the exact "
+    "channel matches (shorter stems are too generic)."
+)
+_CONFIRM_HELP = (
+    "Report, for each flagged (document, item) pair, the item's numbers found in "
+    "the document (numbers_matched / numbers_total) and the longest common "
+    "substring with its question (lcs_chars, lcs_ratio), to tell copies from "
+    "template variants. Report only: never changes which documents are flagged. "
+    "Needs the index's .items.text.jsonl sidecar."
 )
 _ALLOW_EMPTY_BENCHMARKS_HELP = (
     "Build the index even if a benchmark loads no rows or indexes no n-grams "
@@ -432,6 +453,25 @@ class ScanOptions(NamedTuple):
         help=_MIN_ITEM_COVERAGE_HELP,
         show_default="the config's min_item_coverage, 0 = off",
     )
+    exact_channel: str | None = typer.Option(
+        None,
+        "--exact-channel",
+        help=_EXACT_CHANNEL_HELP,
+        show_default="the config's exact_channel, off",
+    )
+    exact_min_chars: int | None = typer.Option(
+        None,
+        "--exact-min-chars",
+        min=1,
+        help=_EXACT_MIN_CHARS_HELP,
+        show_default="the config's exact_min_chars, 12",
+    )
+    confirm: bool | None = typer.Option(
+        None,
+        "--confirm/--no-confirm",
+        help=_CONFIRM_HELP,
+        show_default="the config's confirm, off",
+    )
     max_return_records: int = typer.Option(
         500,
         min=0,
@@ -522,6 +562,15 @@ def _with_scan_options(func: Callable[..., None]) -> Callable[..., None]:
     return wrapper
 
 
+def _exact_channel_option(value: str) -> ExactChannel:
+    mode = value.lower()
+    if mode not in ("off", "short", "all"):
+        raise typer.BadParameter(
+            f"--exact-channel must be off, short or all (got {value!r})."
+        )
+    return mode  # type: ignore[return-value]
+
+
 def _scan_config_from_options(
     opts: ScanOptions,
     cfg: DecontaminationConfig,
@@ -564,8 +613,23 @@ def _scan_config_from_options(
             if opts.min_item_coverage is None
             else opts.min_item_coverage
         ),
+        exact_channel=(
+            cfg.exact_channel
+            if opts.exact_channel is None
+            else _exact_channel_option(opts.exact_channel)
+        ),
+        exact_min_chars=(
+            cfg.exact_min_chars
+            if opts.exact_min_chars is None
+            else opts.exact_min_chars
+        ),
+        confirm=cfg.confirm if opts.confirm is None else opts.confirm,
         **extra,
     )
+    try:
+        check_item_text_sidecar(scan_cfg)
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from e
     _validate_stopgrams_compatibility(
         scan_cfg, allow_unverified_stopgrams=opts.allow_unverified_stopgrams
     )
@@ -907,6 +971,14 @@ def inspect_index_cmd(
     typer.echo(f"  attr_records: {info['attr_records']} (header={info['attr_header']})")
     if info.get("items_format") is not None:
         typer.echo(f"  items format: v{info['items_format']}")
+    typer.echo(
+        "  item text (.items.text.jsonl): "
+        + (
+            "present"
+            if info.get("items_text")
+            else "missing (rebuild the index for --exact-channel and --confirm)"
+        )
+    )
     stop = info.get("item_stopgrams")
     if isinstance(stop, dict):
         typer.echo(
@@ -953,7 +1025,7 @@ def _echo_benchmark_stats(info: dict[str, object]) -> None:
             f"  unflaggable items: {sum(v for v in zero if isinstance(v, int)):,} "
             f"with 0 n-grams, {sum(v for v in below if isinstance(v, int)):,} with "
             f"fewer than min_hits={min_hits} n-grams (0 included). The n-gram rule "
-            "cannot flag these items."
+            "cannot flag these items; --exact-channel short matches them verbatim."
         )
     else:
         typer.echo(
@@ -1097,7 +1169,8 @@ def describe_benchmark(
         )
         if share >= 0.25:
             lines.append(
-                "  Treat this benchmark's n-gram contamination rate as a lower bound."
+                "  Treat this benchmark's n-gram contamination rate as a lower bound,"
+                " or scan with --exact-channel short to match these items verbatim."
             )
     else:
         lines.append("  short items: not measured")

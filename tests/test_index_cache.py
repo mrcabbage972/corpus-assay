@@ -57,6 +57,15 @@ def test_cache_with_v1_item_postings_is_not_ready(tmp_path: Path) -> None:
     assert not native_index_ready(native)
 
 
+def test_cache_without_the_item_text_sidecar_is_not_ready(tmp_path: Path) -> None:
+    """A cache built before `.items.text.jsonl` is rebuilt (exact channel)."""
+    native = tmp_path / "index.native"
+    _write_fake_index(native)
+    assert native_index_ready(native)
+    native_sidecar(native, ".items.text.jsonl").unlink()
+    assert not native_index_ready(native)
+
+
 def test_cache_key_changes_when_a_registry_entry_changes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

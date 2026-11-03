@@ -70,6 +70,36 @@ def _to_text_chunks(x: Any) -> list[str]:
     return [s] if s else []
 
 
+# One field of an item, as kept for the item text sidecar: its text, or the list
+# of its texts when it holds several (e.g. the options of a multiple-choice item).
+FieldValue = str | list[str]
+
+
+def _field_values(obj: Any, keys: list[str]) -> list[FieldValue]:
+    """Each field in ``keys``, in spec order: a string, or a list of strings.
+
+    A field whose value flattens into several text chunks (a list of choices, a
+    ``{"text": [...], "label": [...]}`` mapping) is a list of those chunks;
+    any other field is its text (``""`` when empty). ``" ".join`` of a list
+    entry is the field's text as :func:`_field_texts` returns it.
+    """
+    if not isinstance(obj, Mapping):
+        try:
+            obj = dict(obj)  # type: ignore[arg-type]
+        except Exception:
+            return [str(obj).strip()]
+    values: list[FieldValue] = []
+    for key in keys:
+        chunks = _to_text_chunks(obj.get(key))
+        values.append(chunks if len(chunks) > 1 else (chunks[0] if chunks else ""))
+    return values
+
+
+def field_text(value: FieldValue) -> str:
+    """The text of one field value (a list's chunks joined by spaces)."""
+    return value if isinstance(value, str) else " ".join(value)
+
+
 def _field_texts(obj: Any, keys: list[str]) -> list[str]:
     """The text of each field in ``keys``, in spec order (``""`` when empty).
 
@@ -78,14 +108,8 @@ def _field_texts(obj: Any, keys: list[str]) -> list[str]:
     ``""``, flattens nested structures. A row that is not mapping-like becomes a
     single field.
     """
-    # tolerate non-dict rows (but mapping-like)
-    if not isinstance(obj, Mapping):
-        try:
-            obj = dict(obj)  # type: ignore[arg-type]
-        except Exception:
-            # last resort: stringify whole object
-            return [str(obj).strip()]
-    return [" ".join(_to_text_chunks(obj.get(k))) for k in keys]
+    # Non-mapping rows become one field (see _field_values).
+    return [field_text(value) for value in _field_values(obj, keys)]
 
 
 def _concat_fields(obj: Any, keys: list[str]) -> str:
@@ -214,11 +238,13 @@ class BenchmarkLoader:
             self.spec.splits, status=self.load_status, check_labels=True
         )
 
-    def load_positive_fields(self) -> Iterator[list[str]]:
-        """Like :meth:`load_positive`, but each item is its list of field texts.
+    def load_positive_fields(self) -> Iterator[list[FieldValue]]:
+        """Like :meth:`load_positive`, but each item is its list of fields.
 
         One entry per spec field, in spec order (``""`` for an empty field), so
-        the index of an entry is the field id recorded in the item postings.
+        the index of an entry is the field id recorded in the item postings. A
+        field with several texts (a list of choices) is the list of them; see
+        :func:`_field_values`.
         """
         self.load_status = BenchmarkLoadStatus()
         if not self.spec.splits:
@@ -327,7 +353,8 @@ class BenchmarkLoader:
         for fields in self._load_split_rows(
             target_splits, status=status, check_labels=check_labels
         ):
-            yield f" {FIELD_SEPARATOR} ".join(t for t in fields if t)
+            texts = (field_text(value) for value in fields)
+            yield f" {FIELD_SEPARATOR} ".join(t for t in texts if t)
 
     def _load_split_rows(
         self,
@@ -335,8 +362,8 @@ class BenchmarkLoader:
         *,
         status: BenchmarkLoadStatus,
         check_labels: bool = False,
-    ) -> Iterator[list[str]]:
-        """Iterate resolved configs -> load dataset -> yield each row's field texts."""
+    ) -> Iterator[list[FieldValue]]:
+        """Iterate resolved configs -> load dataset -> yield each row's fields."""
         config_names = self._resolve_config_names()
         if not config_names:
             status.failures.append(self._config_error or "no configs resolved")
@@ -401,7 +428,7 @@ class BenchmarkLoader:
                         logger.warning(f"  WARNING: {warning}")
                 for row in rows:
                     status.rows += 1
-                    yield _field_texts(row, self.spec.fields)
+                    yield _field_values(row, self.spec.fields)
 
         if not found_any:
             logger.warning(
