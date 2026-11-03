@@ -20,6 +20,7 @@ what is shared, what changed, and what that means for reproducing the paper.
 | Sep–Oct 2025 | Pipeline written for MixtureVitae (`decontam_hf.py` plus a Rust scanner, `fast_decont`). The analysis appears in every arXiv version from v1 (29 Sep 2025) to v5 (12 Jan 2026). |
 | Jan 2026 | Code moved into a standalone tool (working name *open-decontaminator*) and developed through 2026. Changes include modular code, YAML configs, a benchmark registry, binary index formats, a memory-mapped backend, provenance metadata, stop-grams, per-item attribution, and a test suite. |
 | Oct 2026 | Released as corpus-assay 0.1.0. |
+| Nov 2026 | corpus-assay 0.2.0: `filter`, `selftest`, an exact-match channel, per-item coverage and fields, multi-field and chat scans, a pinned registry. |
 
 ## What is the same
 

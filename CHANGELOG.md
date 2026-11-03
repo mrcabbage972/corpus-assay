@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-02
+
+Closes issues #1–#14 from the benchmark-overlap audit: new `filter` and `selftest`
+commands, an opt-in exact-match channel for short items, per-item coverage and matched
+fields, scans of several text fields and chat turns, a pinned registry of 25 benchmarks,
+and `build-index` failing on benchmarks that load nothing.
+
+**Upgrading from 0.1.0.** Rebuild your indexes: registry entries changed in place, the
+item postings format is now v2, and `--exact-channel`, `--confirm` and `selftest` need
+the new `.items.text.jsonl` sidecar (0.1.0 indexes still load and scan without them).
+Resumed runs re-scan their shards once, and the `run`/`run-hf` cache rebuilds once.
+Records are now schema v3; v2 records still parse.
+
 ### Added
 
 - `build-index` fails, writing nothing, when a configured benchmark loads no rows or
@@ -267,5 +280,6 @@ Initial public release.
 - Experimental: spaced-seed recall channel (`build-spaced-index`, `--spaced-seeds`).
 - Prebuilt abi3 wheels for CPython 3.12+ on Linux, macOS, and Windows.
 
-[Unreleased]: https://github.com/mrcabbage972/corpus-assay/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/mrcabbage972/corpus-assay/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/mrcabbage972/corpus-assay/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/mrcabbage972/corpus-assay/releases/tag/v0.1.0
