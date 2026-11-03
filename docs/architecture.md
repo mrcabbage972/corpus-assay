@@ -16,6 +16,8 @@ version from 3.12 up.
 | `indexing.py`, `attribution.py`, `formats.py` | Build the index and write its sidecars |
 | `scanner/` | Multiprocess scan driver (`runner.py`), per-shard worker (`worker.py`), output layout and I/O |
 | `reporting.py` | Leak reports from a scan directory |
+| `filtering.py` | Cleaned shards, filter manifest and dataset card snippet (`filter`) |
+| `selftest.py` | Planting, scanning and recall scoring (`selftest`) |
 | `stopgrams.py` | Stop-gram builder and compatibility checks |
 | `spaced_seeds.py`, `spaced_index.py` | Experimental spaced-seed reference implementation and `.spaced` format |
 | `normalization.py`, `constants.py` | Normalization-config staging, defaults |
@@ -27,8 +29,9 @@ version from 3.12 up.
 | Module | Role |
 | --- | --- |
 | `lib.rs` | Python module definition (`corpus_assay._native`) |
-| `text.rs` | Normalization (NFKC, regex tokens, stop words), reject patterns, BLAKE2b-64 n-gram hashing, normalization-config staging |
+| `text.rs` | Normalization (NFKC, regex tokens, stop words), the light normalization of the exact channel, reject patterns, BLAKE2b-64 n-gram hashing, normalization-config staging |
 | `scan.rs` | The scanner: Parquet batches via Arrow, packed-document splitting, gates, per-item evidence, hit and record output |
+| `exact.rs` | The item text sidecar (`.items.text.jsonl`), the exact-match Aho-Corasick channel, choices near the question, and the `--confirm` evidence (numbers, longest common substring via a suffix automaton) |
 | `index.rs`, `mmap_index.rs`, `items_index.rs` | Load the `.native`, `.attr` (in memory or memory-mapped) and `.items` artifacts, with per-process caches |
 | `stopgrams.rs` | Memory-mapped stop-gram set |
 | `spaced.rs` | Experimental spaced-seed matcher and verifier |

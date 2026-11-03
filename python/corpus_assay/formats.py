@@ -19,7 +19,14 @@ class FileType(IntEnum):
     HITS_PAIRS = 3
     # Item-postings sidecar (`<index>.items`): per hash, the protected
     # evaluation-item ids it belongs to. Enables item-level hit gating.
+    # Format v1: records `<u64 hash, u32 n, n × u32 item_idx>`. Still read.
     ITEM_POSTINGS = 4
+    # `.items` format v2: records `<u64 hash, u32 n, n × (u32 item_idx, u32
+    # field_mask)>`, where bit k of the mask is set when the n-gram occurs in the
+    # item's k-th spec field. The header (CAFMTv1, FORMAT_VERSION 1) is unchanged;
+    # the record layout is told apart by this file type, so a reader that only
+    # knows v1 rejects a v2 file instead of misreading it.
+    ITEM_POSTINGS_V2 = 5
 
 
 @dataclass(frozen=True)

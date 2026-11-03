@@ -7,8 +7,10 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from corpus_assay._version import dist_version
+from corpus_assay.attribution import ITEMS_FORMAT_VERSION, AttributionIndex
 from corpus_assay.benchmark_spec import BenchmarkSpec
 from corpus_assay.config import BuildIndexConfig, load_decontamination_config
+from corpus_assay.constants import ITEMS_TEXT_SUFFIX
 from corpus_assay.indexing import build_index_hf
 from corpus_assay.normalization import active_ngram_config_path
 from corpus_assay.scanner.fingerprint import _file_sha256
@@ -47,12 +49,30 @@ def native_index_required_paths(
         # gating under gate_mode="auto". (The standalone `scan` command does not
         # require it — there, auto degrades to union for legacy indexes.)
         paths.append(native_sidecar(native_path, ".items"))
+        paths.append(native_sidecar(native_path, ".items.meta.json"))
+        # The raw item text, for the exact-match channel and --confirm; caches
+        # built before it existed are rebuilt.
+        paths.append(native_sidecar(native_path, ITEMS_TEXT_SUFFIX))
     return paths
 
 
 def native_index_ready(native_path: Path) -> bool:
+    """Whether a cached index is complete and current.
+
+    A cache whose ``.items`` predates field masks (format v1), or that lacks
+    the item text sidecar, is rebuilt, so ``run`` / ``run-hf`` records report
+    which item fields matched and the exact channel and ``--confirm`` work.
+    """
     required = native_index_required_paths(native_path, require_items=True)
-    return all(path.exists() for path in required)
+    if not all(path.exists() for path in required):
+        return False
+    try:
+        version = AttributionIndex.items_sidecar_version(
+            str(native_sidecar(native_path, ".items"))
+        )
+    except (OSError, ValueError):
+        return False
+    return version >= ITEMS_FORMAT_VERSION
 
 
 def benchmark_specs_hash(benchmarks: Iterable[BenchmarkSpec]) -> str:
@@ -73,8 +93,8 @@ def index_cache_path(
 ) -> Path:
     """Cache path for the index a config builds.
 
-    Keyed on the config file, the resolved benchmark specs, the normalization config
-    and the library version. The specs are hashed after registry refs are resolved,
+    Keyed on the config file (which holds ``stopgrams.items``), the resolved
+    benchmark specs, the normalization config and the library version. The specs are hashed after registry refs are resolved,
     so a registry change (same config text, different specs) builds a new index
     instead of reusing a stale one. ``benchmarks`` defaults to loading the config.
     """
@@ -122,6 +142,7 @@ def ensure_native_index(
             allow_unpinned=allow_unpinned,
             allow_empty_benchmarks=allow_empty_benchmarks,
             min_hits=cfg.min_hits,
+            item_stopgrams=cfg.stopgrams.items if cfg.stopgrams else None,
         )
     )
     logger.info("Wrote native index to: %s", native_path)

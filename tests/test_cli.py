@@ -50,6 +50,10 @@ def fake_decon_cfg() -> Any:
         ngram=13,
         min_hits=3,
         min_coverage=0.001,
+        min_item_coverage=0.0,
+        exact_channel="off",
+        exact_min_chars=12,
+        confirm=False,
         background=None,
         stopgrams=None,
         spaced=None,
@@ -222,6 +226,36 @@ def test_scan_with_config_uses_config_values(
     assert scan_cfg.ngram == 13
     assert scan_cfg.min_hits == 3
     assert scan_cfg.min_coverage == 0.001
+    assert scan_cfg.min_item_coverage == 0.0
+
+
+@pytest.mark.parametrize(
+    ("config_value", "flag", "expected"),
+    [(0.0, None, 0.0), (0.6, None, 0.6), (0.6, "0.5", 0.5), (0.0, "0", 0.0)],
+)
+def test_min_item_coverage_from_config_or_flag(
+    tmp_path: Path,
+    tmp_cfg_file: Path,
+    fake_decon_cfg: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    patch_scan_pipeline: dict[str, Any],
+    config_value: float,
+    flag: str | None,
+    expected: float,
+) -> None:
+    fake_decon_cfg.min_item_coverage = config_value
+    monkeypatch.setattr(cli, "load_decontamination_config", lambda _: fake_decon_cfg)
+    idx = tmp_path / "idx.native"
+    idx.write_text("x", encoding="utf-8")
+    args = [
+        "scan", "--input", str(tmp_path / "*.parquet"), "--index", str(idx),
+        "--out-dir", str(tmp_path / "out"), "--config", str(tmp_cfg_file),
+    ]  # fmt: skip
+    if flag is not None:
+        args += ["--min-item-coverage", flag]
+    result = runner.invoke(cli.app, args)
+    assert result.exit_code == 0, result.output
+    assert patch_scan_pipeline["do_scan"][0].min_item_coverage == expected
 
 
 def test_scan_dry_run_plans_only(
@@ -619,12 +653,14 @@ def test_describe_benchmark_prints_spec_and_metadata() -> None:
     assert "1,161 of 1,221 (95%) have fewer than 3 13-grams" in result.output
     assert "the n-gram rule cannot flag them" in result.output
     assert "lower bound" in result.output
+    assert "--exact-channel short" in result.output
 
     gated = runner.invoke(cli.app, ["describe-benchmark", "gpqa_diamond"]).output
     assert "gated: yes" in gated
     assert "short items: not measured" in gated
     lambada = runner.invoke(cli.app, ["describe-benchmark", "lambada"]).output
     assert "lower bound" not in lambada
+    assert "--exact-channel" not in lambada
 
 
 def test_init_config_output_passes_revision_pin_check(tmp_path: Path) -> None:
@@ -697,3 +733,137 @@ def test_inspect_index_tolerates_v1_meta_and_reads_sidecars(tmp_path: Path) -> N
     old = next(line.split() for line in result.output.splitlines() if "Old" in line)
     assert old == ["Old", "?", "3", "?", "?"]
     assert "unflaggable items: unknown" in result.output
+
+
+def test_scanning_commands_share_scan_options() -> None:
+    """scan / run / run-hf take every shared scan option from one definition."""
+    import typer.main
+
+    group = typer.main.get_command(cli.app)
+    shared = set(cli.ScanOptions._fields)
+    for name in ("scan", "run", "run-hf"):
+        command = group.commands[name]  # type: ignore[attr-defined]
+        params = {param.name for param in command.params}
+        assert shared <= params, (name, shared - params)
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        ([], 500),
+        (["--max-return-records", "10"], 10),
+        (["--max-return-records", "0"], None),
+        (["--all-records"], None),
+    ],
+)
+def test_scan_record_cap_flags(
+    tmp_path: Path,
+    tmp_cfg_file: Path,
+    patch_config_loader: None,
+    patch_scan_pipeline: dict[str, Any],
+    flags: list[str],
+    expected: int | None,
+) -> None:
+    idx = tmp_path / "idx.native"
+    idx.write_text("x", encoding="utf-8")
+    result = runner.invoke(
+        cli.app,
+        [
+            "scan",
+            "--input",
+            str(tmp_path / "*.parquet"),
+            "--index",
+            str(idx),
+            "--out-dir",
+            str(tmp_path / "out"),
+            "--config",
+            str(tmp_cfg_file),
+            *flags,
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert patch_scan_pipeline["do_scan"][0].max_return_records == expected
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"), [([], "<|endoftext|>"), (["--no-split"], None)]
+)
+def test_scan_no_split_flag(
+    tmp_path: Path,
+    tmp_cfg_file: Path,
+    patch_config_loader: None,
+    patch_scan_pipeline: dict[str, Any],
+    flags: list[str],
+    expected: str | None,
+) -> None:
+    idx = tmp_path / "idx.native"
+    idx.write_text("x", encoding="utf-8")
+    result = runner.invoke(
+        cli.app,
+        [
+            "scan",
+            "--input",
+            str(tmp_path / "*.parquet"),
+            "--index",
+            str(idx),
+            "--out-dir",
+            str(tmp_path / "out"),
+            "--config",
+            str(tmp_cfg_file),
+            *flags,
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    scan_cfg = patch_scan_pipeline["do_scan"][0]
+    assert scan_cfg.packed_doc_sep == expected
+    assert (scan_cfg.packed_doc_sep_typo is None) == (expected is None)
+
+
+@pytest.mark.parametrize(
+    ("flags", "text_keys", "messages_key"),
+    [
+        ([], ["text"], None),
+        (["--text-key", "body"], ["body"], None),
+        (
+            ["--text-key", "prompt", "--text-key", "chosen", "--text-key", "rejected"],
+            ["prompt", "chosen", "rejected"],
+            None,
+        ),
+        (["--messages-key", "messages"], [], "messages"),
+        (
+            ["--text-key", "system", "--messages-key", "messages"],
+            ["system"],
+            "messages",
+        ),
+    ],
+)
+def test_scan_text_and_messages_keys(
+    tmp_path: Path,
+    tmp_cfg_file: Path,
+    patch_config_loader: None,
+    patch_scan_pipeline: dict[str, Any],
+    flags: list[str],
+    text_keys: list[str],
+    messages_key: str | None,
+) -> None:
+    idx = tmp_path / "idx.native"
+    idx.write_text("x", encoding="utf-8")
+    result = runner.invoke(
+        cli.app,
+        [
+            "scan",
+            "--input",
+            str(tmp_path / "*.parquet"),
+            "--index",
+            str(idx),
+            "--out-dir",
+            str(tmp_path / "out"),
+            "--config",
+            str(tmp_cfg_file),
+            *flags,
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    scan_cfg = patch_scan_pipeline["do_scan"][0]
+    assert scan_cfg.text_keys == text_keys
+    assert scan_cfg.messages_key == messages_key

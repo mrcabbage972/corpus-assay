@@ -10,8 +10,13 @@ benchmarks:            # required, at least one; at most 64 per index
 ngram: 13              # n-gram length (tokens)
 min_hits: 3            # distinct matching n-grams needed to flag a document
 min_coverage: 0.001    # matching / distinct n-grams in the document, in [0, 1]
+min_item_coverage: 0   # share of one item's n-grams a document holds; 0 = off
+exact_channel: off     # exact-match channel: off, short or all
+exact_min_chars: 12    # shortest question the exact channel matches (characters)
+confirm: false         # report copy-vs-variant evidence for flagged pairs
 background: ...        # optional: corpus for build-stopgrams-direct
-stopgrams: ...         # optional: stop-grams to apply during scans
+stopgrams: ...         # optional: stop-grams to apply during scans, and stop-grams
+                       # learned from the items at index time (stopgrams.items)
 spaced: ...            # optional, experimental: spaced-seed index to apply during scans
 ```
 
@@ -140,6 +145,7 @@ background:
     split: train
     fields: [text]
     revision: null
+    packed_doc_sep: "<|endoftext|>" # default; null keeps each document whole
 stopgrams:
   enabled: true                     # apply during scan/run/run-hf
   path: ./stopgrams.native
@@ -147,13 +153,45 @@ stopgrams:
 
 `background.corpus` needs exactly one of `dataset` or `local_path`. `local_path` is a
 JSONL file. `build-stopgrams-direct --tau T` keeps the n-grams that occur in at least a
-`T` fraction of the background documents (for example `--tau 0.001`). Document
+`T` fraction of the background documents (for example `--tau 0.001`). Background
+records are split into documents on `packed_doc_sep` (and its typo variant
+`packed_doc_sep_typo`, default `<|endoftext}>`); set `packed_doc_sep: null` to keep each
+record whole. Document
 frequency is estimated with a per-worker Space-Saving sketch (`--sketch-size`). The
 estimate is a lower bound, so the list errs toward fewer stop-grams. A
 `--stopgrams PATH` flag overrides `stopgrams.path`.
 
 Stop-grams must have been built with the same `ngram` and normalization config as the
 index. The scan checks this against the `.meta.json` files.
+
+### Stop-grams learned from the items (`stopgrams.items`)
+
+When the protected items share text, such as an instruction repeated in nearly every
+question ("Write Python code to solve the problem...", "Let's think step by step"),
+those n-grams link any document containing the instruction to every item, and they are
+rarely frequent in a background corpus. `stopgrams.items` drops them at index time:
+
+```yaml
+stopgrams:
+  items:
+    max_item_share: 0.01   # drop n-grams held by more than 1% of all indexed items
+    min_count: 10          # ... and by at least 10 items (default)
+```
+
+An n-gram is dropped when more than `max_item_share` of all indexed items (across every
+benchmark of the index) *and* at least `min_count` items hold it. It is removed from
+`.native`, `.attr` and `.items`, each holding item's `n_protected_hashes` goes down, and
+the per-benchmark counts (including the items the n-gram rule cannot flag) are taken
+after the drop. The dropped hashes are written to `<index>.item_stopgrams` and the
+thresholds and count to the index's `.meta.json`. `build-index --item-stopgrams-share`
+and `--item-stopgrams-min-count` override the config values; either one turns item
+stop-grams on. Off by default. Because the n-grams leave the index, a copy of an item
+with its instruction is attributed to that item alone, through n-grams unique to it,
+and a copy under a different instruction holds a larger share of the item. `run` and
+`run-hf` take the setting from the config, whose text keys their index cache.
+
+`stopgrams.items` is independent of `stopgrams.enabled` and `stopgrams.path`, which
+apply background stop-grams at scan time.
 
 ## `spaced` (experimental)
 
@@ -190,15 +228,42 @@ An index records the hash of the config it was built with. `scan`, `run` and `ru
 refuse to scan with a different active config unless `--allow-config-mismatch` is
 passed. `run`/`run-hf` also key their index cache on that hash.
 
+## Exact matching and confirmation (`exact_channel`, `exact_min_chars`, `confirm`)
+
+```yaml
+exact_channel: short   # off (default), short or all
+exact_min_chars: 12
+confirm: true
+```
+
+`exact_channel: short` matches, verbatim, the question of each item the n-gram rule
+cannot flag (fewer than `min_hits` n-grams; `inspect-index` and `describe-benchmark`
+show how many there are). `all` matches every item. `exact_min_chars` leaves out
+questions too short to be specific. `confirm` adds report-only copy-vs-variant
+evidence to the records. All three are off by default so existing results stay
+reproducible, and the `--exact-channel`, `--exact-min-chars` and `--confirm` /
+`--no-confirm` flags override them. They need the item text sidecar
+(`<index>.items.text.jsonl`), which indexes built before it existed lack: rebuild them
+(`run` and `run-hf` rebuild their cached index). See
+[how-it-works.md](how-it-works.md#the-exact-match-channel).
+
 ## Scan options worth knowing
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--text-key` / `--id-key` | `text` / none | Columns to read. Without an id, records use a hash of the text. |
+| `--text-key` | `text` | Text column; repeat it to scan several (each is its own document). |
+| `--messages-key` | none | Chat column of `{role, content}` turns; each turn is its own document. |
+| `--id-key` | none | Id column (any type castable to string). Without an id, records use a hash of the text. |
 | `--workers` | CPU count | Worker processes (one shard at a time each). |
 | `--index-backend` | `auto` | `memory` or `mmap`; `auto` uses mmap when `workers > 1`. |
 | `--gate-mode` | `union` | `union` or `item` (see [how-it-works.md](how-it-works.md)). |
 | `--min-longest-run` | `0` | Item gate only: also require a contiguous shared run of N tokens. |
+| `--min-item-coverage` | config `min_item_coverage` (`0`, off) | Share of one item's n-grams a document must hold (`hits / item n-grams`, with at least `min_hits` hits). In `union` mode such a document is flagged whatever its document coverage; in `item` mode it is an extra requirement on the flagging item. Needs `.items`. |
+| `--exact-channel` | config `exact_channel` (`off`) | Exact-match channel: `short` matches the question (first field) of every item with fewer than `min_hits` n-grams, which the n-gram rule cannot flag; `all` matches every item. Verbatim after light normalization (NFKC, lowercase, whitespace), on word boundaries; a match flags the document. Needs `.items.text.jsonl`. |
+| `--exact-min-chars` | config `exact_min_chars` (`12`) | Questions shorter than this many characters (after light normalization) are not matched by the exact channel. |
+| `--confirm` / `--no-confirm` | config `confirm` (off) | For each flagged (document, item) pair, report the item's numbers found in the document and the longest common substring with its question, to tell copies from template variants. Report only: the flags do not change. Needs `.items.text.jsonl`. |
 | `--boilerplate-threshold` | `50` | Item fan-out at which a matched n-gram counts as boilerplate in attribution. |
-| `--max-return-records` | `500` | Sample records written per shard (`0` disables). |
+| `--max-return-records` | `500` | Flagged records written per shard: a sample of the first N flagged. `0` removes the cap. |
+| `--all-records` | off | Write every flagged record (same as `--max-return-records 0`). |
+| `--no-split` | off | Do not split records on the packed-document separator: each record is one document, with id `<id>`. |
 | `--dry-run` | off | Print what would be scanned and exit. |

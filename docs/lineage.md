@@ -117,9 +117,10 @@ equivalents.
   become their values in sorted key order, rather than a JSON dump.
 - **Flagged-document records.** MixtureVitae wrote every flagged document id and had a
   `filter` command that removed them from the dataset. corpus-assay writes a sample of
-  records, by default up to 500 per shard; raise `--max-return-records` to get them all.
-  It has no `filter` command. The exhaustive `per_source_hits/*.hits.bin` files and the
-  leak reports are unaffected by the sample cap.
+  records by default (the first 500 flagged per shard); pass `--all-records` (or
+  `--max-return-records 0`) to get them all. It has no `filter` command. The
+  exhaustive `per_source_hits/*.hits.bin` files and the leak reports are unaffected by
+  the sample cap.
 
 ## Engineering changes (results unaffected)
 
@@ -156,7 +157,7 @@ To get as close to Appendix D as corpus-assay allows:
    Use current Hub ids where the original ones were script-based.
 2. Keep the defaults `ngram: 13`, `min_hits: 3`, `min_coverage: 0.001` and
    `--gate-mode union`.
-3. Pass a large `--max-return-records` if you need every flagged document id.
+3. Pass `--all-records` if you need every flagged document id.
 
 Two differences remain, because they are built into the matching code: n-grams never
 cross fields (§1), and coverage is computed over allowed n-grams (§2). Expect smaller

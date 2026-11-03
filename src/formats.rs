@@ -29,6 +29,10 @@ pub enum FileType {
     /// evaluation-item ids it belongs to. Enables item-level (rather than
     /// benchmark-level) hit gating in the scanner.
     ItemPostings = 4,
+    /// Item-postings sidecar, format v2: each posting also carries a field mask
+    /// (bit k = the n-gram occurs in the item's k-th spec field). Same header;
+    /// the record layout is told apart by the file type.
+    ItemPostingsV2 = 5,
 }
 
 #[derive(Clone, Copy, Debug)]

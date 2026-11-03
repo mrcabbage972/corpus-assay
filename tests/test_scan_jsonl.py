@@ -94,16 +94,36 @@ def test_jsonl_missing_text_key_errors(tmp_path: Path, index_path: str) -> None:
         scan_file(shard, cfg, layout)
 
 
-def test_parquet_large_string_text_column_is_rejected(
+def test_parquet_large_string_text_column_is_scanned(
     tmp_path: Path, index_path: str
 ) -> None:
-    """Documented limitation: the Rust scanner needs a plain UTF-8 text column."""
+    """``large_string`` text columns (and int ids) are read, not rejected."""
     shard = tmp_path / "a.parquet"
-    table = pa.table({"text": pa.array([LEAK], type=pa.large_string())})
+    table = pa.table(
+        {
+            "id": pa.array([7, 8], type=pa.int64()),
+            "text": pa.array([LEAK, CLEAN], type=pa.large_string()),
+        }
+    )
     pq.write_table(table, shard)
     cfg = _cfg(tmp_path, index_path)
     layout = OutputLayout(Path(cfg.out_dir))
     layout.ensure_dirs()
 
-    with pytest.raises(ValueError, match="not a string type"):
+    scanned, contaminated, _empty, records = scan_file(shard, cfg, layout)
+
+    assert (scanned, contaminated) == (2, 1)
+    assert [json.loads(r)["doc_id"] for r in records] == ["7-part-0"]
+
+
+def test_parquet_non_string_text_column_is_rejected(
+    tmp_path: Path, index_path: str
+) -> None:
+    shard = tmp_path / "a.parquet"
+    pq.write_table(pa.table({"text": pa.array([1, 2])}), shard)
+    cfg = _cfg(tmp_path, index_path)
+    layout = OutputLayout(Path(cfg.out_dir))
+    layout.ensure_dirs()
+
+    with pytest.raises(ValueError, match="expected a string column"):
         scan_file(shard, cfg, layout)

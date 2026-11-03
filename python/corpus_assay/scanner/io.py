@@ -9,15 +9,17 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from corpus_assay.config import ScanConfig
-from corpus_assay.constants import INDEX_FORMAT_VERSION
+from corpus_assay.constants import INDEX_FORMAT_VERSION, ITEMS_TEXT_SUFFIX
 from corpus_assay.scanner.fingerprint import (
     _file_sha256,
+    build_run_fingerprint,
     library_version,
     rust_extension_version,
 )
 from corpus_assay.scanner.layout import OutputLayout
 from corpus_assay.scanner.schema import (
     ContaminationRecord,
+    ItemBestFile,
     RunSummary,
     ScanSummary,
 )
@@ -25,7 +27,9 @@ from corpus_assay.schemas import (
     FINAL_SUMMARY_SCHEMA_VERSION,
     RUN_MANIFEST_SCHEMA_VERSION,
     SCAN_SUMMARY_SCHEMA_VERSION,
+    BenchmarkStats,
     FinalSummaryOutput,
+    RunBenchmarkInfo,
     RunHFDatasetInput,
     RunIndexInfo,
     RunInputs,
@@ -68,26 +72,130 @@ def parse_contamination_record(line: str) -> ContaminationRecord:
     return ContaminationRecord.model_validate(raw)
 
 
+def read_item_best(path: Path) -> ItemBestFile:
+    """Read one shard's ``per_item_best/<shard>.json``."""
+    return ItemBestFile.model_validate_json(path.read_text(encoding="utf-8"))
+
+
 def maybe_write_contaminated_docs(
     path: Path, contaminated: int, json_results: Iterable[str]
 ) -> None:
     """
-    Write a sampled NDJSON file of contaminated docs (json_results is capped upstream).
+    Write the NDJSON records of flagged docs for one shard.
+
+    ``json_results`` is capped upstream by ``max_return_records`` (a sample of the
+    first N flagged sub-documents, or every one when uncapped). No file is
+    written when there are no records, and a stale file from an earlier run of
+    the same shard is removed so the directory never shows records the current
+    run did not return.
     """
-    if contaminated <= 0:
+    lines = list(json_results) if contaminated > 0 else []
+    if not lines:
+        path.unlink(missing_ok=True)
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
-        for line in json_results:
+        for line in lines:
             f.write(line)
             f.write("\n")
+
+
+def run_fingerprint_of(run: RunSummary, cfg: ScanConfig) -> dict[str, Any]:
+    """The run fingerprint the shards were scanned under.
+
+    Every ok shard summary carries it (a resumed one only when it matched), so
+    the index files are not hashed a second time; computed when no summary has
+    one.
+    """
+    for summary in run.per_file:
+        if summary.run_fingerprint:
+            return summary.run_fingerprint
+    return build_run_fingerprint(cfg)
+
+
+def build_index_info(
+    index_path: Path, run_fingerprint: dict[str, Any] | None = None
+) -> RunIndexInfo:
+    """Describe an index for a manifest: its files' SHA-256 and what it indexed.
+
+    ``run_fingerprint`` (from ``build_run_fingerprint``) supplies the hashes it
+    already holds; the rest are computed. The benchmarks, per-benchmark counts
+    and config hashes come from ``<index>.meta.json`` (left empty when it is
+    missing or unreadable).
+    """
+    fp = run_fingerprint or {}
+
+    def sha(key: str, suffix: str) -> str | None:
+        if key in fp:
+            return fp[key]
+        return _file_sha256(index_path.with_name(f"{index_path.name}{suffix}"))
+
+    meta_path = index_path.with_name(f"{index_path.name}.meta.json")
+    meta: dict[str, Any] = {}
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        meta = {}
+    benchmark_keys = set(RunBenchmarkInfo.model_fields)
+    benchmarks = [
+        RunBenchmarkInfo.model_validate(
+            {k: v for k, v in entry.items() if k in benchmark_keys}
+        )
+        for entry in meta.get("benchmarks") or []
+        if isinstance(entry, dict)
+    ]
+    stats = [
+        BenchmarkStats.model_validate(entry)
+        for entry in meta.get("benchmark_stats") or []
+    ]
+    return RunIndexInfo(
+        path=str(index_path.resolve()),
+        meta_path=str(meta_path.resolve()),
+        index_format_version=INDEX_FORMAT_VERSION,
+        meta_sha256=sha("index_meta_sha256", ".meta.json"),
+        native_sha256=sha("index_sha256", ""),
+        attr_sha256=sha("index_attr_sha256", ".attr"),
+        sources_sha256=_file_sha256(
+            index_path.with_name(f"{index_path.name}.sources.json")
+        ),
+        items_sha256=sha("index_items_sha256", ".items"),
+        items_meta_sha256=sha("index_items_meta_sha256", ".items.meta.json"),
+        items_text_sha256=sha("index_items_text_sha256", ITEMS_TEXT_SUFFIX),
+        item_stopgrams_sha256=sha("index_item_stopgrams_sha256", ".item_stopgrams"),
+        normalization_config_sha=meta.get("normalization_config_sha"),
+        ngram_config_hash=meta.get("ngram_config_hash"),
+        benchmarks=benchmarks,
+        benchmark_stats=stats,
+    )
+
+
+def build_scan_config_info(cfg: ScanConfig) -> RunScanConfig:
+    """The settings that decide what a scan flags, for a manifest."""
+    return RunScanConfig(
+        text_key=cfg.text_keys[0] if cfg.text_keys else None,
+        text_keys=list(cfg.text_keys),
+        messages_key=cfg.messages_key,
+        id_key=cfg.id_key,
+        n=cfg.ngram,
+        min_hits=cfg.min_hits,
+        min_coverage=cfg.min_coverage,
+        min_item_coverage=cfg.min_item_coverage,
+        gate_mode=cfg.gate_mode,
+        min_longest_run=cfg.min_longest_run,
+        boilerplate_threshold=cfg.boilerplate_threshold,
+        exact_channel=cfg.exact_channel,
+        exact_min_chars=cfg.exact_min_chars,
+        confirm=cfg.confirm,
+        packed_doc_sep=cfg.packed_doc_sep,
+        packed_doc_sep_typo=cfg.packed_doc_sep_typo,
+        stopgrams_path=cfg.stopgrams_path,
+    )
 
 
 def write_run_outputs(layout: OutputLayout, run: RunSummary, cfg: ScanConfig) -> None:
     layout.out_dir.mkdir(parents=True, exist_ok=True)
 
     index_path = Path(cfg.index_path)
-    meta_path = index_path.with_name(f"{index_path.name}.meta.json")
 
     parquet_shards: list[RunParquetShard] = []
     for path_str in cfg.inputs:
@@ -122,22 +230,8 @@ def write_run_outputs(layout: OutputLayout, run: RunSummary, cfg: ScanConfig) ->
             rust_extension_version=rust_extension_version(),
             run_id=uuid4(),
             started_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            index=RunIndexInfo(
-                path=str(index_path.resolve()),
-                meta_path=str(meta_path.resolve()),
-                index_format_version=INDEX_FORMAT_VERSION,
-                meta_sha256=_file_sha256(meta_path),
-            ),
-            scan_config=RunScanConfig(
-                text_key=cfg.text_key,
-                id_key=cfg.id_key,
-                n=cfg.ngram,
-                min_hits=cfg.min_hits,
-                min_coverage=cfg.min_coverage,
-                packed_doc_sep=cfg.packed_doc_sep,
-                packed_doc_sep_typo=cfg.packed_doc_sep_typo,
-                stopgrams_path=cfg.stopgrams_path,
-            ),
+            index=build_index_info(index_path, run_fingerprint_of(run, cfg)),
+            scan_config=build_scan_config_info(cfg),
             inputs=RunInputs(
                 input_paths=list(cfg.inputs),
                 hf_datasets=hf_datasets,
@@ -163,6 +257,7 @@ def write_run_outputs(layout: OutputLayout, run: RunSummary, cfg: ScanConfig) ->
             total_contaminated=run.total_contaminated,
             contamination_rate=run.contamination_rate,
             total_empty_after_filter=run.total_empty_after_filter,
+            total_contaminated_by_channel=dict(run.total_contaminated_by_channel),
             failed_files=run.failed_files,
             total_files=run.total_files,
         ).model_dump_json(indent=2),

@@ -22,6 +22,8 @@ once_cell = "1.18"
 # Text normalization and n-gram hashing
 unicode-normalization = "0.1"
 regex = "1.10"
+# Exact-match channel (multi-pattern search over light-normalized text)
+aho-corasick = "1.1"
 blake2 = "0.10"
 hex = "0.4"
 sha2 = "0.10"
