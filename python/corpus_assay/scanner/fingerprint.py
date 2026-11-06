@@ -8,7 +8,7 @@ from typing import Any
 from corpus_assay import _native
 from corpus_assay._version import dist_version
 from corpus_assay.config import ScanConfig
-from corpus_assay.constants import INDEX_FORMAT_VERSION
+from corpus_assay.constants import INDEX_FORMAT_VERSION, ITEMS_TEXT_SUFFIX
 from corpus_assay.normalization import active_ngram_config_path
 
 
@@ -45,6 +45,26 @@ def build_run_fingerprint(cfg: ScanConfig) -> dict[str, Any]:
         ),
         "index_meta_sha256": _file_sha256(
             index_path.with_name(f"{index_path.name}.meta.json")
+        ),
+        # The item postings drive the item gate, the per-item evidence and the
+        # field names in the records: rebuilding them in place must not let a
+        # resumed run reuse summaries scanned against the old ones. None when
+        # the index has no item sidecar.
+        "index_items_sha256": _file_sha256(
+            index_path.with_name(f"{index_path.name}.items")
+        ),
+        "index_items_meta_sha256": _file_sha256(
+            index_path.with_name(f"{index_path.name}.items.meta.json")
+        ),
+        # Item stop-grams are already removed from the files above; hashed so the
+        # fingerprint names every index artifact. None when not built.
+        "index_item_stopgrams_sha256": _file_sha256(
+            index_path.with_name(f"{index_path.name}.item_stopgrams")
+        ),
+        # Raw item text: decides exact-channel flags and the text evidence in
+        # the records. None when the index has none.
+        "index_items_text_sha256": _file_sha256(
+            index_path.with_name(f"{index_path.name}{ITEMS_TEXT_SUFFIX}")
         ),
         "config_sha256": hashlib.sha256(
             json.dumps(cfg.model_dump(), sort_keys=True).encode("utf-8")

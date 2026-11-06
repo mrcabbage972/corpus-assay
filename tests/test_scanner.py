@@ -44,7 +44,8 @@ def cfg(workdir: Path) -> Any:
                 "inputs": self.inputs,
                 "out_dir": self.out_dir,
                 "workers": self.workers,
-                "text_key": self.text_key,
+                "text_keys": self.text_keys,
+                "messages_key": self.messages_key,
                 "id_key": self.id_key,
                 "index_path": self.index_path,
                 "ngram": self.ngram,
@@ -66,13 +67,18 @@ def cfg(workdir: Path) -> Any:
                 "gate_mode": self.gate_mode,
                 "min_longest_run": self.min_longest_run,
                 "boilerplate_threshold": self.boilerplate_threshold,
+                "min_item_coverage": self.min_item_coverage,
+                "exact_channel": self.exact_channel,
+                "exact_min_chars": self.exact_min_chars,
+                "confirm": self.confirm,
             }
 
     return Cfg(
         inputs=["shards/*.jsonl"],
         out_dir=str(out_dir),
         workers=1,
-        text_key="text",
+        text_keys=["text"],
+        messages_key=None,
         id_key="id",
         index_path=str(index_path),
         ngram=13,
@@ -94,6 +100,10 @@ def cfg(workdir: Path) -> Any:
         gate_mode="auto",
         min_longest_run=0,
         boilerplate_threshold=50,
+        min_item_coverage=0.0,
+        exact_channel="off",
+        exact_min_chars=12,
+        confirm=False,
     )
 
 
@@ -156,15 +166,15 @@ def patch_rust_scanner(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_scan_stream_rust(
         *,
         input,
-        text_key: str,
+        text_key: str | list[str],
         id_key: str,
         index_path: str,
         index_backend: str,
         n: int,
         min_hits: int,
         min_coverage: float,
-        packed_doc_sep: str,
-        packed_doc_sep_typo: str,
+        packed_doc_sep: str | None,
+        packed_doc_sep_typo: str | None,
         out_hits_path: str,
         max_return_records: int | None,
         stopgrams_path: str | None,
@@ -175,6 +185,13 @@ def patch_rust_scanner(monkeypatch: pytest.MonkeyPatch) -> None:
         spaced_min_loci: int = 3,
         spaced_ver_min_span: int = 17,
         spaced_ver_identity: float = 0.85,
+        messages_key: str | None = None,
+        min_item_coverage: float = 0.0,
+        out_item_best_path: str | None = None,
+        exact_channel: str = "off",
+        exact_min_chars: int = 12,
+        confirm: bool = False,
+        channel_counts: dict[str, int] | None = None,
     ):
         # distinguish shards by stem (the hits path embeds it; JSONL input arrives
         # as an in-memory Parquet buffer without a file name)
@@ -190,9 +207,21 @@ def patch_rust_scanner(monkeypatch: pytest.MonkeyPatch) -> None:
         else:
             contaminated = 2
             json_results = [
-                json.dumps({"doc_id": "d1", "src_hits": [[1, 3], [2, 1]]}),
                 json.dumps(
-                    {"doc_id": "d2", "src_hits": [[1, 2], [2, 2]]}
+                    {
+                        "doc_id": "d1",
+                        "src_hits": [[1, 3], [2, 1]],
+                        "part": 0,
+                        "row_index": 0,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "doc_id": "d2",
+                        "src_hits": [[1, 2], [2, 2]],
+                        "part": 0,
+                        "row_index": 1,
+                    }
                 ),  # tie => both primary
             ]
 

@@ -20,6 +20,7 @@ what is shared, what changed, and what that means for reproducing the paper.
 | Sep–Oct 2025 | Pipeline written for MixtureVitae (`decontam_hf.py` plus a Rust scanner, `fast_decont`). The analysis appears in every arXiv version from v1 (29 Sep 2025) to v5 (12 Jan 2026). |
 | Jan 2026 | Code moved into a standalone tool (working name *open-decontaminator*) and developed through 2026. Changes include modular code, YAML configs, a benchmark registry, binary index formats, a memory-mapped backend, provenance metadata, stop-grams, per-item attribution, and a test suite. |
 | Oct 2026 | Released as corpus-assay 0.1.0. |
+| Nov 2026 | corpus-assay 0.2.0: `filter`, `selftest`, an exact-match channel, per-item coverage and fields, multi-field and chat scans, a pinned registry. |
 
 ## What is the same
 
@@ -117,9 +118,10 @@ equivalents.
   become their values in sorted key order, rather than a JSON dump.
 - **Flagged-document records.** MixtureVitae wrote every flagged document id and had a
   `filter` command that removed them from the dataset. corpus-assay writes a sample of
-  records, by default up to 500 per shard; raise `--max-return-records` to get them all.
-  It has no `filter` command. The exhaustive `per_source_hits/*.hits.bin` files and the
-  leak reports are unaffected by the sample cap.
+  records by default (the first 500 flagged per shard); pass `--all-records` (or
+  `--max-return-records 0`) to get them all. It has no `filter` command. The
+  exhaustive `per_source_hits/*.hits.bin` files and the leak reports are unaffected by
+  the sample cap.
 
 ## Engineering changes (results unaffected)
 
@@ -156,7 +158,7 @@ To get as close to Appendix D as corpus-assay allows:
    Use current Hub ids where the original ones were script-based.
 2. Keep the defaults `ngram: 13`, `min_hits: 3`, `min_coverage: 0.001` and
    `--gate-mode union`.
-3. Pass a large `--max-return-records` if you need every flagged document id.
+3. Pass `--all-records` if you need every flagged document id.
 
 Two differences remain, because they are built into the matching code: n-grams never
 cross fields (§1), and coverage is computed over allowed n-grams (§2). Expect smaller

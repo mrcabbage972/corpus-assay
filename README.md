@@ -37,8 +37,19 @@ going to report on?*
 
 A document is flagged when it shares at least `min_hits` distinct word 13-grams with the
 benchmark index **and** those hits cover at least `min_coverage` of the document's
-distinct 13-grams. Matching runs on normalized text (Unicode NFKC, lowercased, stop
+distinct 13-grams. With `--min-item-coverage C`, a document holding at least a share `C`
+of one item's 13-grams is flagged too, however long it is. Matching runs on normalized text (Unicode NFKC, lowercased, stop
 words removed), so it survives casing, punctuation, and whitespace changes.
+
+**Short items.** Items too short to have `min_hits` 13-grams once stop words are
+removed (many short math problems and commonsense multiple-choice questions) can never
+be flagged by the n-gram rule; `build-index`, `inspect-index` and `describe-benchmark`
+say how many there are. `--exact-channel short` matches their questions verbatim, after
+a light normalization that keeps numbers, operators and stop words (so `2+3` and `2-3`
+stay different), and reports whether the item's choices appear near the question.
+`--confirm` adds, for every flagged pair, the share of the item's numbers found and the
+longest common substring, to tell a copy from another problem built on the same
+template. Both are off by default and need an index built by this version.
 
 This is a *verbatim-overlap* detector. Paraphrases, translations, and heavily edited
 copies will not be flagged. An experimental spaced-seed channel
@@ -131,6 +142,19 @@ corpus-assay scan --config config.yaml --index bench.native \
   --input "data/**/*.parquet" --id-key id --out-dir scan_out
 ```
 
+Records with several texts can be scanned field by field. Each text, and each chat turn,
+is scanned as its own document, and the records say which field (and role and turn) it
+was:
+
+```bash
+# Preference data: prompt and both answers
+corpus-assay scan ... --text-key prompt --text-key chosen --text-key rejected
+# Chat data: a `messages` column of {role, content} turns
+corpus-assay scan ... --messages-key messages --no-split
+```
+
+A shard's string columns that are not scanned are reported in a warning.
+
 **4. Report.**
 
 ```bash
@@ -144,11 +168,12 @@ Top leaking shards:
   shard-0: 85 unique hashes (85.00/1k docs)
 ```
 
-Each flagged document is written as a sample record to
-`scan_out/contaminated_docs/*.ndjson`:
+Flagged documents are written as records to `scan_out/contaminated_docs/*.ndjson`. By
+default this is a sample of the first 500 flagged per shard; pass `--all-records` to get
+every one:
 
 ```json
-{"doc_id": "doc500-part-0", "match_count": 85, "src_hits": [[0, 85]],
+{"doc_id": "doc500-part-0", "field": "text", "match_count": 85, "src_hits": [[0, 85]],
  "item_hits": [{"item_id": 7, "hits": 85, "longest_run_tokens": 75, "unique_hits": 85, ...}]}
 ```
 
@@ -188,6 +213,8 @@ benchmarks:
 | `inspect-index` | Validate an index and list per-benchmark item and n-gram counts |
 | `scan` | Scan Parquet/JSONL shards against an index |
 | `run`, `run-hf` | Build or reuse a cached index, then scan local shards or an HF split |
+| `filter` | Scan, then write decontaminated copies of the shards with a manifest of the index used |
+| `selftest` | Plant benchmark items into clean text, scan it with your settings, and report recall |
 | `report` | Leak reports (JSON, CSV, Markdown) from a scan directory |
 | `inspect-run` | Validate a scan output directory |
 | `reproduce` | Re-run a scan from its `_RUN_MANIFEST.json` after checking input hashes |
@@ -201,21 +228,63 @@ benchmarks:
 
 ```
 scan_out/
-├── _FINAL_SUMMARY.json / .csv      # totals: docs scanned, contaminated, failed files
-├── _RUN_MANIFEST.json              # full scan config, input hashes, tool versions
+├── _FINAL_SUMMARY.json / .csv      # totals: docs scanned, contaminated (per channel), failed files
+├── _RUN_MANIFEST.json              # scan config, index file and input hashes, benchmarks, tool versions
 ├── summaries/<shard>.summary.json  # per-shard counts (also the resume cache)
 ├── per_source_hits/<shard>.hits.bin
-├── contaminated_docs/<shard>.decontam.sample.ndjson   # up to 500 records per shard
+├── per_item_best/<shard>.json      # best single-document coverage of each item hit
+├── contaminated_docs/<shard>.decontam.sample.ndjson   # first 500 flagged per shard (--all-records: every one)
 └── report/                         # written by `report`
     ├── report.md / report.json
     ├── leak_by_benchmark.csv / .json
     ├── leak_by_shard.csv / .json
-    └── leak_by_item.csv / .json
+    ├── leak_by_item.csv / .json
+    └── template_variants.csv / .json   # with --confirm: likely template variants
 ```
 
 Re-running `scan` with the same inputs and config skips shards that are already done.
 File formats are documented in
 [docs/outputs.md](https://github.com/mrcabbage972/corpus-assay/blob/main/docs/outputs.md).
+
+## Filtering
+
+`filter` takes the same options as `scan`, scans every shard (keeping every flagged
+record), and writes cleaned copies in the input format, at the inputs' relative
+paths, without touching the inputs:
+
+```bash
+corpus-assay filter --input data/ --index index.native --config config.yaml \
+  --id-key id --out-dir data_clean/                  # drop rows with a flagged part
+corpus-assay filter ... --granularity subdoc         # drop only the flagged parts
+```
+
+`record` granularity (the default) drops every row with a flagged sub-document;
+`subdoc` drops the flagged packed parts, empties flagged text fields and removes
+flagged chat turns, and drops a row only when nothing is left. Next to the data it
+writes `_FILTER_MANIFEST.json` (the index files' SHA-256, the benchmarks with their
+revisions and splits, the per-benchmark counts, gate and thresholds, tool versions,
+input and output shard hashes and row counts, and removals per benchmark),
+`removed_ids.ndjson`, a `DATASET_CARD_SNIPPET.md` to paste into the dataset card,
+and the scan itself under `_scan/`. It refuses a non-empty `--out-dir` unless
+`--overwrite`.
+
+## Checking recall
+
+`selftest` measures what a scan with your settings would catch. It samples items
+from the index, plants them into synthetic filler (or copies of your first
+records, `--host corpus --input ...`), scans the planted file once per gate (and
+with the exact channel when `--exact-channel` is set), and prints recall per gate,
+channel and variant, the missed items, and false positives on unplanted hosts:
+
+```bash
+corpus-assay selftest --index index.native --config config.yaml --out-dir selftest/ \
+  --n-items 50 --variants verbatim,case,whitespace,wrapper --exact-channel short
+```
+
+Items no enabled channel can match (fewer than `min_hits` n-grams and not covered
+by the exact channel) are listed apart and left out of recall. It exits non-zero
+when recall on matchable verbatim plants is below `--min-recall` (default 1.0), and
+writes `planted.parquet` and `truth.jsonl` so the result can be reproduced.
 
 ## Reducing false positives
 
@@ -239,10 +308,22 @@ File formats are documented in
   corpus-assay scan ... --stopgrams stopgrams.native
   ```
 
+- **Item stop-grams.** When the protected items repeat an instruction ("Write Python
+  code to solve the problem..."), `stopgrams.items: {max_item_share: 0.01}` in the
+  config (or `build-index --item-stopgrams-share 0.01`) drops the n-grams held by more
+  than 1% of the items from the index.
 - **Item gate.** `--gate-mode item` flags a document only if a *single* benchmark item
   clears the thresholds on its own, rather than the union of all matches.
+- **Template variants.** `--confirm` reports, for each flagged pair, how many of the
+  item's numbers the document has and its longest common substring with the question;
+  `report` lists the pairs that look like other problems from the same template.
 
 ## Python API
+
+`do_scan` runs its workers with the `spawn` start method, which re-imports your main
+script in every worker. **Call it under an `if __name__ == "__main__":` guard.** Without
+the guard each worker would re-run the script's setup and the scan; `do_scan` detects
+this and raises a `RuntimeError` instead of hanging.
 
 ```python
 from pathlib import Path
@@ -267,7 +348,7 @@ if __name__ == "__main__":  # required: scan workers are spawned processes
     )
     scan_cfg = ScanConfig(
         inputs=["data/"],
-        text_key="text",
+        text_keys=["text"],  # several columns: ["prompt", "chosen", "rejected"]
         id_key="id",
         index_path="bench.native",
         out_dir="scan_out",
@@ -286,12 +367,13 @@ if __name__ == "__main__":  # required: scan workers are spawned processes
 
 - At most 64 benchmarks per index, because attribution is stored as a 64-bit mask. Use
   several indexes for more.
-- The text column must be a plain UTF-8 string column. Parquet `large_string` columns are
-  rejected; cast them first.
+- Text columns must be string columns (`string`, `large_string`, string view or string
+  dictionary); chat columns must be lists of `{role, content}` structs.
 - JSONL shards are loaded fully into memory and converted to Parquet before scanning.
   Use Parquet for very large shards.
 - Documents are split on `<|endoftext|>`, and each part is scored separately. Records are
-  named `<id>-part-<k>`.
+  named `<id>-part-<k>` (`<id>/<field>[/<turn>]-part-<k>` when several fields or a
+  messages column are scanned). Pass `--no-split` to score each text whole.
 - Only verbatim overlap is detected; see [above](#what-it-detects-and-what-it-doesnt).
 
 ## Documentation

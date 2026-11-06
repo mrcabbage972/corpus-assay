@@ -10,8 +10,8 @@ authors:
     given-names: Victor
 repository-code: "https://github.com/mrcabbage972/corpus-assay"
 license: Apache-2.0
-version: 0.1.0
-date-released: "2026-10-03"
+version: 0.2.0
+date-released: "2026-11-02"
 # Concept DOI: covers all versions and resolves to the latest. Zenodo archives every
 # GitHub Release and mints a version-specific DOI for it as well.
 doi: 10.5281/zenodo.23125328

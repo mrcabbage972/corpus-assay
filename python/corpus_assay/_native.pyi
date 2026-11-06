@@ -6,7 +6,7 @@ __version__: str
 
 def scan_stream_rust(
     input: IO[bytes],
-    text_key: str,
+    text_key: str | list[str],
     id_key: str | None,
     index_path: str,
     n: int,
@@ -14,7 +14,7 @@ def scan_stream_rust(
     min_coverage: float,
     index_backend: str = "auto",
     out_hits_path: str | None = None,
-    packed_doc_sep: str = "<|endoftext|>",
+    packed_doc_sep: str | None = "<|endoftext|>",
     packed_doc_sep_typo: str | None = "<|endoftext}>",
     max_return_records: int | None = 500,
     stopgrams_path: str | None = None,
@@ -25,11 +25,40 @@ def scan_stream_rust(
     spaced_ver_min_span: int = 17,
     spaced_ver_identity: float = 0.85,
     boilerplate_threshold: int = 50,
+    messages_key: str | None = None,
+    min_item_coverage: float = 0.0,
+    out_item_best_path: str | None = None,
+    exact_channel: str = "off",
+    exact_min_chars: int = 12,
+    confirm: bool = False,
+    channel_counts: dict[str, int] | None = None,
 ) -> tuple[int, int, list[str], int]:
-    """Scan a Parquet stream; returns ``(scanned, contaminated, records, empty)``."""
+    """Scan a Parquet stream; returns ``(scanned, contaminated, records, empty)``.
+
+    ``text_key`` is one text column or a list of them; ``messages_key`` names an
+    optional ``list<struct{role, content}>`` chat column. Each text, and each chat
+    turn, is scanned as its own sub-document(s). ``packed_doc_sep=None`` turns
+    packed-document splitting off; ``max_return_records`` of ``None`` or ``0``
+    returns every flagged record. ``min_item_coverage`` > 0 also flags a document
+    holding that share of one item's n-grams (union mode) or requires it of the
+    flagging item (item mode). ``out_item_best_path`` receives, as JSON, the best
+    single-document coverage of each item with a hit (needs item postings).
+
+    ``exact_channel`` (``off`` / ``short`` / ``all``) turns on the exact-match
+    channel over questions of at least ``exact_min_chars`` characters, and
+    ``confirm`` the copy-vs-variant evidence; both need the index's
+    ``.items.text.jsonl``. ``channel_counts``, when given, receives the flagged
+    sub-documents per enabled channel (``ngram``, ``spaced``, ``exact``).
+    """
 
 def set_ngram_config_path(path: str) -> None: ...
 def normalize_text(s: str) -> list[str]: ...
+def light_normalize(s: str) -> str:
+    """NFKC, lowercase, whitespace runs collapsed to one space, trimmed."""
+
+def longest_common_substring(a: str, b: str) -> int:
+    """Longest common substring, in characters, of two light-normalized texts."""
+
 def ngram_allowed(ngram: str) -> bool: ...
 def hash_ngram(ngram: str) -> int: ...
 def ngram_filter(ngram: str) -> tuple[bool, int | None]: ...

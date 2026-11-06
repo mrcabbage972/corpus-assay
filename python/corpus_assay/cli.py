@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import functools
+import inspect
 import json
 import logging
 import os
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple, get_type_hints
 
 import typer
 import yaml
@@ -18,8 +20,11 @@ from corpus_assay.benchmark_registry import (
     SHORT_ITEM_NGRAM,
 )
 from corpus_assay.config import (
+    DEFAULT_PACKED_DOC_SEP,
     BuildIndexConfig,
     DecontaminationConfig,
+    ExactChannel,
+    ItemStopGramsConfig,
     ScanConfig,
     SpacedSeedsConfig,
     load_decontamination_config,
@@ -28,8 +33,9 @@ from corpus_assay.constants import DEFAULT_INDEX_CACHE_DIR
 from corpus_assay.indexing import EmptyBenchmarkError, build_index_hf
 from corpus_assay.inspect import format_benchmark_table, inspect_index, inspect_run
 from corpus_assay.reporting import generate_report_from_scan_dir
-from corpus_assay.scanner import OutputLayout, do_scan, write_run_outputs
+from corpus_assay.scanner import OutputLayout, RunSummary, do_scan, write_run_outputs
 from corpus_assay.scanner.fingerprint import _file_sha256, library_version
+from corpus_assay.scanner.runner import check_item_text_sidecar
 from corpus_assay.schemas import RunManifest
 from corpus_assay.services.config_validation import ConfigValidator
 from corpus_assay.services.hf_parquet import (
@@ -80,6 +86,32 @@ _GATE_MODE_HELP = (
 _MIN_LONGEST_RUN_HELP = (
     "With --gate-mode item, also require a contiguous run of >= this many normalized "
     "tokens shared with the matching item (0 disables)."
+)
+_MIN_ITEM_COVERAGE_HELP = (
+    "Share of one item's n-grams a document must hold (item coverage = hits / the "
+    "item's n-grams, with at least min_hits hits). With --gate-mode union it also "
+    "flags such a document whatever its document coverage, so a long document "
+    "holding a whole item is caught; with --gate-mode item it is an extra "
+    "requirement on the flagging item. 0 turns it off. Needs the .items sidecar."
+)
+_EXACT_CHANNEL_HELP = (
+    "Exact-match channel: off, short (items with fewer than min_hits n-grams, "
+    "which the n-gram rule cannot flag) or all (every item). Matches each item's "
+    "question (its first field) verbatim after light normalization (Unicode NFKC, "
+    "lowercase, whitespace collapsed; numbers, operators and stop words kept), on "
+    "word boundaries; a match flags the document. Needs the index's "
+    ".items.text.jsonl sidecar."
+)
+_EXACT_MIN_CHARS_HELP = (
+    "Shortest question, in characters after light normalization, the exact "
+    "channel matches (shorter stems are too generic)."
+)
+_CONFIRM_HELP = (
+    "Report, for each flagged (document, item) pair, the item's numbers found in "
+    "the document (numbers_matched / numbers_total) and the longest common "
+    "substring with its question (lcs_chars, lcs_ratio), to tell copies from "
+    "template variants. Report only: never changes which documents are flagged. "
+    "Needs the index's .items.text.jsonl sidecar."
 )
 _ALLOW_EMPTY_BENCHMARKS_HELP = (
     "Build the index even if a benchmark loads no rows or indexes no n-grams "
@@ -353,6 +385,264 @@ def _validate_index_config_compatibility(
 
 
 # -----------------------------
+# Shared scan options (scan / run / run-hf)
+# -----------------------------
+
+
+class ScanOptions(NamedTuple):
+    """Options shared by every command that scans (``scan``, ``run``, ``run-hf``).
+
+    A NamedTuple rather than a dataclass so the module also loads when it is not
+    in ``sys.modules`` (as under ``typer corpus_assay.cli utils docs``, which
+    generates docs/cli.md).
+
+    Each field's default is the ``typer.Option`` that declares the flag;
+    ``_with_scan_options`` splices the fields into a command's signature and hands
+    the parsed values to the command as one ``opts: ScanOptions`` argument. Add a
+    scan flag here (and use it in ``_scan_config_from_options``) and every scanning
+    command gets it.
+    """
+
+    text_key: list[str] | None = typer.Option(
+        None,
+        "--text-key",
+        help=(
+            "Column containing document text. Repeat to scan several columns "
+            "(e.g. --text-key prompt --text-key chosen --text-key rejected); each "
+            "is scanned as its own document. Default: text (none when "
+            "--messages-key is given)."
+        ),
+        show_default=False,
+    )
+    messages_key: str | None = typer.Option(
+        None,
+        "--messages-key",
+        help=(
+            "Chat column holding a list of {role, content} messages; each turn is "
+            "scanned as its own document and records carry its role and turn index."
+        ),
+    )
+    id_key: str | None = typer.Option(
+        None, help="Optional stable doc id field (otherwise hashed from text)."
+    )
+    workers: int = typer.Option(
+        os.cpu_count() or 8,
+        help="Parallel worker processes.",
+        show_default="CPU count",
+    )
+    index_backend: str = typer.Option(
+        "auto", help="Index backend: auto, memory, or mmap."
+    )
+    no_split: bool = typer.Option(
+        False,
+        "--no-split",
+        help=(
+            "Do not split records on the packed-document separator "
+            "(<|endoftext|> and its typo variant): each record is one document, "
+            "and doc ids get no -part-<k> suffix. Use for chat data or decoded "
+            "text that may legitimately contain the token."
+        ),
+    )
+    gate_mode: str = typer.Option("union", help=_GATE_MODE_HELP)
+    min_longest_run: int = typer.Option(0, help=_MIN_LONGEST_RUN_HELP)
+    boilerplate_threshold: int = typer.Option(50, help=_BOILERPLATE_THRESHOLD_HELP)
+    min_item_coverage: float | None = typer.Option(
+        None,
+        min=0.0,
+        max=1.0,
+        help=_MIN_ITEM_COVERAGE_HELP,
+        show_default="the config's min_item_coverage, 0 = off",
+    )
+    exact_channel: str | None = typer.Option(
+        None,
+        "--exact-channel",
+        help=_EXACT_CHANNEL_HELP,
+        show_default="the config's exact_channel, off",
+    )
+    exact_min_chars: int | None = typer.Option(
+        None,
+        "--exact-min-chars",
+        min=1,
+        help=_EXACT_MIN_CHARS_HELP,
+        show_default="the config's exact_min_chars, 12",
+    )
+    confirm: bool | None = typer.Option(
+        None,
+        "--confirm/--no-confirm",
+        help=_CONFIRM_HELP,
+        show_default="the config's confirm, off",
+    )
+    max_return_records: int = typer.Option(
+        500,
+        min=0,
+        help=(
+            "Max flagged sub-document records written per shard to "
+            "contaminated_docs/: a sample (the first N flagged, in scan order). "
+            "Use 0 (or --all-records) to write every flagged record. The per-shard "
+            "counts and hits.bin are always exhaustive."
+        ),
+    )
+    all_records: bool = typer.Option(
+        False,
+        "--all-records",
+        help=(
+            "Write every flagged record to contaminated_docs/ (no cap; same as "
+            "--max-return-records 0)."
+        ),
+    )
+    stopgrams: str | None = typer.Option(
+        None,
+        "--stopgrams",
+        help="Path to stop-grams native file (optional).",
+    )
+    allow_unverified_stopgrams: bool = typer.Option(
+        False,
+        "--allow-unverified-stopgrams",
+        help="Allow stop-grams without a compatible meta file.",
+    )
+    spaced_seeds: str | None = typer.Option(
+        None,
+        "--spaced-seeds",
+        help="[Experimental] Path to a .spaced index for the spaced-seed recall channel.",
+    )
+    allow_unverified_spaced: bool = typer.Option(
+        False,
+        "--allow-unverified-spaced",
+        help="Allow a spaced index without a compatible meta file.",
+    )
+    allow_config_mismatch: bool = typer.Option(
+        False,
+        "--allow-config-mismatch",
+        help="Scan even if the index was built with a different ngram config.",
+    )
+
+
+_SCAN_OPTION_NAMES = ScanOptions._fields
+
+
+def _with_scan_options(func: Callable[..., None]) -> Callable[..., None]:
+    """Give a command the shared scan options in place of its ``opts`` parameter.
+
+    Typer builds the CLI from the function signature, so the wrapper advertises
+    the command's own parameters with the ``ScanOptions`` fields spliced in where
+    ``opts`` was, and packs the parsed values back into a ``ScanOptions``.
+    """
+    own_hints = get_type_hints(func)
+    option_hints = get_type_hints(ScanOptions)
+    shared = [
+        inspect.Parameter(
+            name,
+            inspect.Parameter.KEYWORD_ONLY,
+            default=ScanOptions._field_defaults[name],
+            annotation=option_hints[name],
+        )
+        for name in _SCAN_OPTION_NAMES
+    ]
+    params: list[inspect.Parameter] = []
+    for param in inspect.signature(func).parameters.values():
+        if param.name == "opts":
+            params.extend(shared)
+            continue
+        params.append(
+            param.replace(
+                kind=inspect.Parameter.KEYWORD_ONLY,
+                annotation=own_hints.get(param.name, param.annotation),
+            )
+        )
+    if len(params) == len(inspect.signature(func).parameters):
+        raise TypeError(f"{func.__name__} must take an 'opts: ScanOptions' parameter")
+
+    @functools.wraps(func)
+    def wrapper(**kwargs: Any) -> None:
+        opts = ScanOptions(**{name: kwargs.pop(name) for name in _SCAN_OPTION_NAMES})
+        func(**kwargs, opts=opts)
+
+    wrapper.__signature__ = inspect.Signature(params, return_annotation=None)  # type: ignore[attr-defined]
+    wrapper.__annotations__ = {param.name: param.annotation for param in params}
+    return wrapper
+
+
+def _exact_channel_option(value: str) -> ExactChannel:
+    mode = value.lower()
+    if mode not in ("off", "short", "all"):
+        raise typer.BadParameter(
+            f"--exact-channel must be off, short or all (got {value!r})."
+        )
+    return mode  # type: ignore[return-value]
+
+
+def _scan_config_from_options(
+    opts: ScanOptions,
+    cfg: DecontaminationConfig,
+    *,
+    inputs: list[str],
+    index_path: str,
+    out_dir: Path,
+    **extra: Any,
+) -> ScanConfig:
+    """Build the ``ScanConfig`` for a scanning command and validate its sidecars.
+
+    ``extra`` carries command-specific fields (e.g. the ``target_hf_*`` provenance
+    of ``run-hf``).
+    """
+    resolved_spaced = _resolve_spaced(cfg, spaced_path=opts.spaced_seeds)
+    scan_cfg = ScanConfig(
+        inputs=inputs,
+        text_keys=opts.text_key or [],
+        messages_key=opts.messages_key,
+        id_key=opts.id_key,
+        index_path=index_path,
+        ngram=cfg.ngram,
+        min_hits=cfg.min_hits,
+        min_coverage=cfg.min_coverage,
+        out_dir=str(out_dir),
+        workers=opts.workers,
+        index_backend=opts.index_backend,
+        packed_doc_sep=None if opts.no_split else DEFAULT_PACKED_DOC_SEP,
+        max_return_records=None if opts.all_records else opts.max_return_records,
+        stopgrams_path=_resolve_stopgrams_path(cfg, stopgrams_path=opts.stopgrams),
+        spaced_path=resolved_spaced.path,
+        spaced_min_loci=resolved_spaced.min_loci,
+        spaced_ver_min_span=resolved_spaced.ver_min_span,
+        spaced_ver_identity=resolved_spaced.ver_identity,
+        gate_mode=opts.gate_mode,
+        min_longest_run=opts.min_longest_run,
+        boilerplate_threshold=opts.boilerplate_threshold,
+        min_item_coverage=(
+            cfg.min_item_coverage
+            if opts.min_item_coverage is None
+            else opts.min_item_coverage
+        ),
+        exact_channel=(
+            cfg.exact_channel
+            if opts.exact_channel is None
+            else _exact_channel_option(opts.exact_channel)
+        ),
+        exact_min_chars=(
+            cfg.exact_min_chars
+            if opts.exact_min_chars is None
+            else opts.exact_min_chars
+        ),
+        confirm=cfg.confirm if opts.confirm is None else opts.confirm,
+        **extra,
+    )
+    try:
+        check_item_text_sidecar(scan_cfg)
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from e
+    _validate_stopgrams_compatibility(
+        scan_cfg, allow_unverified_stopgrams=opts.allow_unverified_stopgrams
+    )
+    _validate_spaced_compatibility(
+        scan_cfg, allow_unverified_spaced=opts.allow_unverified_spaced
+    )
+    _validate_index_config_compatibility(
+        scan_cfg, allow_config_mismatch=opts.allow_config_mismatch
+    )
+    return scan_cfg
+
+
+# -----------------------------
 # Commands
 # -----------------------------
 
@@ -373,16 +663,50 @@ def build_index(
     allow_empty_benchmarks: bool = typer.Option(
         False, "--allow-empty-benchmarks", help=_ALLOW_EMPTY_BENCHMARKS_HELP
     ),
+    item_stopgrams_share: float | None = typer.Option(
+        None,
+        "--item-stopgrams-share",
+        min=0.0,
+        max=1.0,
+        help=(
+            "Drop n-grams held by more than this share of all indexed items (e.g. "
+            "0.01), such as an instruction line repeated across the items, so a "
+            "wrapped copy of an item still matches in full. Overrides "
+            "stopgrams.items.max_item_share and turns item stop-grams on."
+        ),
+        show_default="config, else off",
+    ),
+    item_stopgrams_min_count: int | None = typer.Option(
+        None,
+        "--item-stopgrams-min-count",
+        min=2,
+        help=(
+            "Only drop n-grams held by at least this many items. Overrides "
+            "stopgrams.items.min_count and turns item stop-grams on."
+        ),
+        show_default="config, else 10",
+    ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Plan index build only; do not execute."
     ),
 ) -> None:
     """Download HF benchmarks and build native index (.native)."""
     cfg = load_decontamination_config(config)
+    item_stopgrams = _resolve_item_stopgrams(
+        cfg,
+        max_item_share=item_stopgrams_share,
+        min_count=item_stopgrams_min_count,
+    )
     if dry_run:
         typer.echo(f"Would build native index at: {out_index}")
         typer.echo(f"Benchmarks: {len(cfg.benchmarks)}")
         typer.echo(f"ngram={cfg.ngram}")
+        if item_stopgrams is not None:
+            typer.echo(
+                "Item stop-grams: "
+                f"max_item_share={item_stopgrams.max_item_share:g} "
+                f"min_count={item_stopgrams.min_count}"
+            )
         raise typer.Exit(code=0)
     with _empty_benchmarks_exit():
         build_index_hf(
@@ -393,8 +717,36 @@ def build_index(
                 allow_unpinned=allow_unpinned,
                 allow_empty_benchmarks=allow_empty_benchmarks,
                 min_hits=cfg.min_hits,
+                item_stopgrams=item_stopgrams,
             )
         )
+
+
+def _resolve_item_stopgrams(
+    cfg: DecontaminationConfig,
+    *,
+    max_item_share: float | None,
+    min_count: int | None,
+) -> ItemStopGramsConfig | None:
+    """``stopgrams.items`` from the config, with the build-index flags applied.
+
+    Either flag turns item stop-grams on (the other setting from the config, or
+    its default).
+    """
+    base = cfg.stopgrams.items if cfg.stopgrams else None
+    if max_item_share is None and min_count is None:
+        return base
+    update: dict[str, Any] = {}
+    if max_item_share is not None:
+        update["max_item_share"] = max_item_share
+    if min_count is not None:
+        update["min_count"] = min_count
+    try:
+        return ItemStopGramsConfig.model_validate(
+            {**(base.model_dump() if base else {}), **update}
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(f"Invalid item stop-gram settings: {exc}") from exc
 
 
 @app.command("build-stopgrams-direct")
@@ -617,6 +969,23 @@ def inspect_index_cmd(
         f"  native_records: {info['native_records']} (header={info['native_header']})"
     )
     typer.echo(f"  attr_records: {info['attr_records']} (header={info['attr_header']})")
+    if info.get("items_format") is not None:
+        typer.echo(f"  items format: v{info['items_format']}")
+    typer.echo(
+        "  item text (.items.text.jsonl): "
+        + (
+            "present"
+            if info.get("items_text")
+            else "missing (rebuild the index for --exact-channel and --confirm)"
+        )
+    )
+    stop = info.get("item_stopgrams")
+    if isinstance(stop, dict):
+        typer.echo(
+            f"  item stop-grams: {stop['dropped']:,} n-gram(s) dropped (held by more "
+            f"than {stop['max_item_share']:g} of {stop['n_items']:,} items, and at "
+            f"least {stop['min_count']})"
+        )
     _echo_benchmark_stats(info)
 
 
@@ -656,7 +1025,7 @@ def _echo_benchmark_stats(info: dict[str, object]) -> None:
             f"  unflaggable items: {sum(v for v in zero if isinstance(v, int)):,} "
             f"with 0 n-grams, {sum(v for v in below if isinstance(v, int)):,} with "
             f"fewer than min_hits={min_hits} n-grams (0 included). The n-gram rule "
-            "cannot flag these items."
+            "cannot flag these items; --exact-channel short matches them verbatim."
         )
     else:
         typer.echo(
@@ -764,6 +1133,14 @@ def reproduce(
     computed = _file_sha256(Path(payload.index.meta_path))
     if payload.index.meta_sha256 and computed != payload.index.meta_sha256:
         raise typer.BadParameter("Index meta sha256 mismatch ...")
+    # Manifests written before the index files were hashed lack native_sha256.
+    if payload.index.native_sha256:
+        computed = _file_sha256(Path(payload.index.path))
+        if computed != payload.index.native_sha256:
+            raise typer.BadParameter(
+                f"Index sha256 mismatch for {payload.index.path} "
+                f"(expected {payload.index.native_sha256}, got {computed})."
+            )
 
     out_dir_p = Path(scan_cfg.out_dir)
     _validate_stopgrams_compatibility(scan_cfg)
@@ -800,7 +1177,8 @@ def describe_benchmark(
         )
         if share >= 0.25:
             lines.append(
-                "  Treat this benchmark's n-gram contamination rate as a lower bound."
+                "  Treat this benchmark's n-gram contamination rate as a lower bound,"
+                " or scan with --exact-channel short to match these items verbatim."
             )
     else:
         lines.append("  short items: not measured")
@@ -850,7 +1228,9 @@ def validate_config(
 
 
 @app.command("scan")
+@_with_scan_options
 def scan(
+    *,
     inputs: list[str] = typer.Option(
         ...,
         "--input",
@@ -863,60 +1243,12 @@ def scan(
     out_dir: str = typer.Option(
         ..., help="Directory for per-file outputs and summaries."
     ),
-    text_key: str = typer.Option(
-        "text", help="Field name containing document text (default: text)."
-    ),
-    id_key: str | None = typer.Option(
-        None, help="Optional stable doc id field (otherwise hashed from text)."
-    ),
+    opts: ScanOptions,
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Plan scan only; do not execute."
     ),
-    workers: int = typer.Option(
-        os.cpu_count() or 8,
-        help="Parallel worker processes.",
-        show_default="CPU count",
-    ),
-    index_backend: str = typer.Option(
-        "auto", help="Index backend: auto, memory, or mmap."
-    ),
-    gate_mode: str = typer.Option("union", help=_GATE_MODE_HELP),
-    min_longest_run: int = typer.Option(0, help=_MIN_LONGEST_RUN_HELP),
-    boilerplate_threshold: int = typer.Option(50, help=_BOILERPLATE_THRESHOLD_HELP),
-    max_return_records: int | None = typer.Option(
-        500,
-        help=(
-            "Max contaminated document records to return per shard "
-            "(sample only; use 0 to disable)."
-        ),
-    ),
     config: str = typer.Option(
         ..., help="YAML config with decontamination hyperparameters."
-    ),
-    stopgrams: str | None = typer.Option(
-        None,
-        "--stopgrams",
-        help="Path to stop-grams native file (optional).",
-    ),
-    allow_unverified_stopgrams: bool = typer.Option(
-        False,
-        "--allow-unverified-stopgrams",
-        help="Allow stop-grams without a compatible meta file.",
-    ),
-    spaced_seeds: str | None = typer.Option(
-        None,
-        "--spaced-seeds",
-        help="[Experimental] Path to a .spaced index for the spaced-seed recall channel.",
-    ),
-    allow_unverified_spaced: bool = typer.Option(
-        False,
-        "--allow-unverified-spaced",
-        help="Allow a spaced index without a compatible meta file.",
-    ),
-    allow_config_mismatch: bool = typer.Option(
-        False,
-        "--allow-config-mismatch",
-        help="Scan even if the index was built with a different ngram config.",
     ),
 ) -> None:
     """Scan dataset shards using the fast Rust worker."""
@@ -937,43 +1269,234 @@ def scan(
         typer.echo(f"Would write outputs under: {plan.out_dir}")
         raise typer.Exit(code=0)
 
-    resolved_stopgrams = _resolve_stopgrams_path(cfg, stopgrams_path=stopgrams)
-    resolved_spaced = _resolve_spaced(cfg, spaced_path=spaced_seeds)
-    scan_cfg = ScanConfig(
+    scan_cfg = _scan_config_from_options(
+        opts,
+        cfg,
+        out_dir=out_dir_p,
         inputs=inputs,
-        text_key=text_key,
-        id_key=id_key,
         index_path=index,
-        ngram=cfg.ngram,
-        min_hits=cfg.min_hits,
-        min_coverage=cfg.min_coverage,
-        out_dir=str(out_dir_p),
-        workers=workers,
-        index_backend=index_backend,
-        max_return_records=max_return_records,
-        stopgrams_path=resolved_stopgrams,
-        spaced_path=resolved_spaced.path,
-        spaced_min_loci=resolved_spaced.min_loci,
-        spaced_ver_min_span=resolved_spaced.ver_min_span,
-        spaced_ver_identity=resolved_spaced.ver_identity,
-        gate_mode=gate_mode,
-        min_longest_run=min_longest_run,
-        boilerplate_threshold=boilerplate_threshold,
-    )
-    _validate_stopgrams_compatibility(
-        scan_cfg, allow_unverified_stopgrams=allow_unverified_stopgrams
-    )
-    _validate_spaced_compatibility(
-        scan_cfg, allow_unverified_spaced=allow_unverified_spaced
-    )
-    _validate_index_config_compatibility(
-        scan_cfg, allow_config_mismatch=allow_config_mismatch
     )
     _run_scan(scan_cfg, out_dir_p)
 
 
+@app.command("filter")
+@_with_scan_options
+def filter_cmd(
+    *,
+    inputs: list[str] = typer.Option(
+        ...,
+        "--input",
+        "--input-glob",
+        help=(
+            "Input path(s): directory, glob (recursive), or file list. Repeat --input for multiple."
+        ),
+    ),
+    index: str = typer.Option(..., help="Path to the .native index."),
+    out_dir: str = typer.Option(
+        ...,
+        help=(
+            "Directory for the cleaned shards (at the inputs' paths relative to "
+            "their common directory), _FILTER_MANIFEST.json, removed_ids.ndjson, "
+            "DATASET_CARD_SNIPPET.md and the scan outputs (_scan/)."
+        ),
+    ),
+    opts: ScanOptions,
+    config: str = typer.Option(
+        ..., help="YAML config with decontamination hyperparameters."
+    ),
+    granularity: str = typer.Option(
+        "record",
+        help=(
+            "record: drop every row with a flagged sub-document. subdoc: remove "
+            "only the flagged sub-documents (packed parts are dropped and the rest "
+            "rejoined, an emptied text field is set to '', an emptied chat turn is "
+            "removed); a row left with no text is dropped."
+        ),
+    ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="Replace the outputs of a previous filter run in a non-empty --out-dir.",
+    ),
+) -> None:
+    """Write decontaminated copies of the shards, with a manifest of the index used.
+
+    Scans like `scan` (every flagged record is kept, whatever
+    --max-return-records says), then writes each shard in its own format with
+    the flagged rows (or sub-documents) removed. Input files are not modified.
+    """
+    from corpus_assay import filtering
+
+    if granularity not in ("record", "subdoc"):
+        raise typer.BadParameter(
+            f"--granularity must be record or subdoc (got {granularity!r})."
+        )
+    cfg = load_decontamination_config(Path(config))
+    # Every flagged sub-document must come back to be removed. Built (and its
+    # sidecars checked) before plan_filter clears a previous run's outputs.
+    scan_cfg = _scan_config_from_options(
+        opts._replace(all_records=True),
+        cfg,
+        out_dir=Path(out_dir).resolve() / filtering.SCAN_DIR_NAME,
+        inputs=inputs,
+        index_path=index,
+    )
+    try:
+        plan = filtering.plan_filter(inputs, Path(out_dir), overwrite=overwrite)
+    except (filtering.FilterError, FileNotFoundError) as e:
+        raise typer.BadParameter(str(e)) from e
+    run = do_scan(scan_cfg)
+    write_run_outputs(layout=OutputLayout(plan.scan_dir), run=run, cfg=scan_cfg)
+    try:
+        manifest = filtering.write_filtered(
+            plan,
+            scan_cfg,
+            run,
+            granularity=granularity,  # type: ignore[arg-type]
+            config_path=config,
+        )
+    except filtering.FilterError as e:
+        typer.echo(f"[filter] ERROR: {e}", err=True)
+        raise typer.Exit(code=1) from None
+
+    rem = manifest.removals
+    typer.echo(
+        f"[filter] {len(manifest.shards)} shard(s): {rem.rows_before:,} rows in, "
+        f"{rem.rows_after:,} out ({rem.rows_removed:,} removed"
+        + (f", {rem.rows_modified:,} modified" if granularity == "subdoc" else "")
+        + f"); {rem.flagged_subdocs:,} flagged sub-documents."
+    )
+    for name, counts in rem.by_benchmark.items():
+        typer.echo(
+            f"  {name}: {counts.rows_removed:,} rows removed"
+            + (
+                f", {counts.rows_modified:,} modified"
+                if granularity == "subdoc"
+                else ""
+            )
+        )
+    typer.echo(f"[filter] Wrote {plan.out_dir / filtering.FILTER_MANIFEST_NAME}")
+
+
+def _scan_and_write(scan_cfg: ScanConfig) -> RunSummary:
+    run = do_scan(scan_cfg, print_progress=False)
+    write_run_outputs(
+        layout=OutputLayout(Path(scan_cfg.out_dir)), run=run, cfg=scan_cfg
+    )
+    return run
+
+
+@app.command("selftest")
+@_with_scan_options
+def selftest_cmd(
+    *,
+    index: str = typer.Option(..., help="Path to the .native index."),
+    out_dir: str = typer.Option(
+        ...,
+        help=(
+            "Directory for planted.parquet, truth.jsonl, selftest.json and the "
+            "scans of the planted file (scans/)."
+        ),
+    ),
+    opts: ScanOptions,
+    config: str = typer.Option(
+        ..., help="YAML config with decontamination hyperparameters."
+    ),
+    inputs: list[str] | None = typer.Option(
+        None,
+        "--input",
+        "--input-glob",
+        help="Input shards whose first records host the plants (--host corpus).",
+    ),
+    n_items: int = typer.Option(
+        50, "--n-items", min=1, help="Items to sample from the index."
+    ),
+    seed: int = typer.Option(0, help="Random seed (item sample and perturbations)."),
+    variants: str = typer.Option(
+        "verbatim",
+        help=(
+            "Comma list of plant variants: verbatim, case (upper/lower/title), "
+            "whitespace (collapsed/expanded), wrapper (a lead-in and a trailing line)."
+        ),
+    ),
+    host: str = typer.Option(
+        "synthetic",
+        help=(
+            "Host documents: synthetic filler text, or corpus (copies of the first "
+            "records of --input, read from the scan's text or messages column)."
+        ),
+    ),
+    min_recall: float = typer.Option(
+        1.0,
+        "--min-recall",
+        min=0.0,
+        max=1.0,
+        help=(
+            "Exit non-zero when the recall of the configured gate (and exact "
+            "channel) on matchable verbatim plants is below this."
+        ),
+    ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="Replace a previous selftest in a non-empty --out-dir.",
+    ),
+) -> None:
+    """Plant benchmark items into clean text, scan it, and report recall.
+
+    Samples items from the index's .items.text.jsonl, plants each under each
+    variant, and scans the planted file with this command's scan settings once
+    per gate (union, and item when the index has .items) and, with
+    --exact-channel, once more with the exact channel. Reports recall per run,
+    variant and channel, the missed items, the items no enabled channel can
+    match (left out of recall), and false positives on the unplanted hosts.
+    Every flagged record is kept, and one worker scans the planted file, so
+    --max-return-records and --workers have no effect.
+    """
+    from corpus_assay import selftest
+
+    if host not in ("synthetic", "corpus"):
+        raise typer.BadParameter(f"--host must be synthetic or corpus (got {host!r}).")
+    if host == "corpus" and not inputs:
+        raise typer.BadParameter("--host corpus needs --input.")
+    try:
+        variant_list = selftest.parse_variants(variants)
+    except selftest.SelftestError as e:
+        raise typer.BadParameter(str(e)) from e
+    cfg = load_decontamination_config(Path(config))
+    out_dir_p = Path(out_dir)
+    scan_cfg = _scan_config_from_options(
+        opts._replace(all_records=True),
+        cfg,
+        out_dir=out_dir_p,
+        inputs=list(inputs or []),
+        index_path=index,
+    )
+    try:
+        selftest.prepare_out_dir(out_dir_p, overwrite=overwrite)
+        report = selftest.run_selftest(
+            scan_cfg,
+            out_dir_p,
+            scan=_scan_and_write,
+            n_items=n_items,
+            seed=seed,
+            variants=variant_list,
+            host=host,  # type: ignore[arg-type]
+            min_recall=min_recall,
+        )
+    except selftest.SelftestError as e:
+        typer.echo(f"[selftest] ERROR: {e}", err=True)
+        raise typer.Exit(code=2) from None
+    typer.echo(selftest.format_report(report))
+    typer.echo(f"[selftest] Wrote {out_dir_p / selftest.REPORT_NAME}")
+    if not report.passed:
+        raise typer.Exit(code=1)
+
+
 @app.command("run-hf")
+@_with_scan_options
 def run_hf(
+    *,
     config: str = typer.Option(
         ..., help="YAML config with decontamination hyperparameters."
     ),
@@ -985,30 +1508,7 @@ def run_hf(
     out_dir: str = typer.Option(
         ..., help="Directory for per-file outputs and summaries."
     ),
-    text_key: str = typer.Option(
-        "text", help="Field name containing document text (default: text)."
-    ),
-    id_key: str | None = typer.Option(
-        None, help="Optional stable doc id field (otherwise hashed from text)."
-    ),
-    workers: int = typer.Option(
-        os.cpu_count() or 8,
-        help="Parallel worker processes.",
-        show_default="CPU count",
-    ),
-    index_backend: str = typer.Option(
-        "auto", help="Index backend: auto, memory, or mmap."
-    ),
-    gate_mode: str = typer.Option("union", help=_GATE_MODE_HELP),
-    min_longest_run: int = typer.Option(0, help=_MIN_LONGEST_RUN_HELP),
-    boilerplate_threshold: int = typer.Option(50, help=_BOILERPLATE_THRESHOLD_HELP),
-    max_return_records: int | None = typer.Option(
-        500,
-        help=(
-            "Max contaminated document records to return per shard "
-            "(sample only; use 0 to disable)."
-        ),
-    ),
+    opts: ScanOptions,
     allow_unpinned: bool = typer.Option(
         False,
         "--allow-unpinned",
@@ -1040,31 +1540,6 @@ def run_hf(
         False,
         "--trust-remote-code",
         help="Allow execution of dataset loading code from the Hub.",
-    ),
-    stopgrams: str | None = typer.Option(
-        None,
-        "--stopgrams",
-        help="Path to stop-grams native file (optional).",
-    ),
-    allow_unverified_stopgrams: bool = typer.Option(
-        False,
-        "--allow-unverified-stopgrams",
-        help="Allow stop-grams without a compatible meta file.",
-    ),
-    spaced_seeds: str | None = typer.Option(
-        None,
-        "--spaced-seeds",
-        help="[Experimental] Path to a .spaced index for the spaced-seed recall channel.",
-    ),
-    allow_unverified_spaced: bool = typer.Option(
-        False,
-        "--allow-unverified-spaced",
-        help="Allow a spaced index without a compatible meta file.",
-    ),
-    allow_config_mismatch: bool = typer.Option(
-        False,
-        "--allow-config-mismatch",
-        help="Scan even if the index was built with a different ngram config.",
     ),
 ) -> None:
     """Build (or reuse) a native index and scan a HF dataset split."""
@@ -1137,47 +1612,24 @@ def run_hf(
     )
     _echo_paths("Using parquet shards:", parquet_paths)
 
-    resolved_stopgrams = _resolve_stopgrams_path(cfg, stopgrams_path=stopgrams)
-    resolved_spaced = _resolve_spaced(cfg, spaced_path=spaced_seeds)
-    scan_cfg = ScanConfig(
+    scan_cfg = _scan_config_from_options(
+        opts,
+        cfg,
+        out_dir=out_dir_p,
         inputs=[str(path) for path in parquet_paths],
-        text_key=text_key,
-        id_key=id_key,
         index_path=str(native_index),
-        ngram=cfg.ngram,
-        min_hits=cfg.min_hits,
-        min_coverage=cfg.min_coverage,
-        out_dir=str(out_dir_p),
-        workers=workers,
-        index_backend=index_backend,
-        max_return_records=max_return_records,
         target_hf_dataset=hf_dataset,
         target_hf_split=split,
         target_hf_revision=hf_revision,
         target_hf_fingerprint=dataset_fingerprint,
-        stopgrams_path=resolved_stopgrams,
-        spaced_path=resolved_spaced.path,
-        spaced_min_loci=resolved_spaced.min_loci,
-        spaced_ver_min_span=resolved_spaced.ver_min_span,
-        spaced_ver_identity=resolved_spaced.ver_identity,
-        gate_mode=gate_mode,
-        min_longest_run=min_longest_run,
-        boilerplate_threshold=boilerplate_threshold,
-    )
-    _validate_stopgrams_compatibility(
-        scan_cfg, allow_unverified_stopgrams=allow_unverified_stopgrams
-    )
-    _validate_spaced_compatibility(
-        scan_cfg, allow_unverified_spaced=allow_unverified_spaced
-    )
-    _validate_index_config_compatibility(
-        scan_cfg, allow_config_mismatch=allow_config_mismatch
     )
     _run_scan(scan_cfg, out_dir_p)
 
 
 @app.command("run")
+@_with_scan_options
 def run(
+    *,
     config: str = typer.Option(
         ..., help="YAML config with decontamination hyperparameters."
     ),
@@ -1192,30 +1644,7 @@ def run(
     out_dir: str = typer.Option(
         ..., help="Directory for per-file outputs and summaries."
     ),
-    text_key: str = typer.Option(
-        "text", help="Field name containing document text (default: text)."
-    ),
-    id_key: str | None = typer.Option(
-        None, help="Optional stable doc id field (otherwise hashed from text)."
-    ),
-    workers: int = typer.Option(
-        os.cpu_count() or 8,
-        help="Parallel worker processes.",
-        show_default="CPU count",
-    ),
-    index_backend: str = typer.Option(
-        "auto", help="Index backend: auto, memory, or mmap."
-    ),
-    gate_mode: str = typer.Option("union", help=_GATE_MODE_HELP),
-    min_longest_run: int = typer.Option(0, help=_MIN_LONGEST_RUN_HELP),
-    boilerplate_threshold: int = typer.Option(50, help=_BOILERPLATE_THRESHOLD_HELP),
-    max_return_records: int | None = typer.Option(
-        500,
-        help=(
-            "Max contaminated document records to return per shard "
-            "(sample only; use 0 to disable)."
-        ),
-    ),
+    opts: ScanOptions,
     allow_unpinned: bool = typer.Option(
         False,
         "--allow-unpinned",
@@ -1231,31 +1660,6 @@ def run(
         str(DEFAULT_INDEX_CACHE_DIR),
         help="Directory to cache built native indexes (honors XDG_CACHE_HOME).",
         show_default="~/.cache/corpus-assay/indexes",
-    ),
-    stopgrams: str | None = typer.Option(
-        None,
-        "--stopgrams",
-        help="Path to stop-grams native file (optional).",
-    ),
-    allow_unverified_stopgrams: bool = typer.Option(
-        False,
-        "--allow-unverified-stopgrams",
-        help="Allow stop-grams without a compatible meta file.",
-    ),
-    spaced_seeds: str | None = typer.Option(
-        None,
-        "--spaced-seeds",
-        help="[Experimental] Path to a .spaced index for the spaced-seed recall channel.",
-    ),
-    allow_unverified_spaced: bool = typer.Option(
-        False,
-        "--allow-unverified-spaced",
-        help="Allow a spaced index without a compatible meta file.",
-    ),
-    allow_config_mismatch: bool = typer.Option(
-        False,
-        "--allow-config-mismatch",
-        help="Scan even if the index was built with a different ngram config.",
     ),
 ) -> None:
     """Build (or reuse) a native index and scan dataset shards in one command."""
@@ -1284,37 +1688,12 @@ def run(
             allow_unpinned=allow_unpinned,
             allow_empty_benchmarks=allow_empty_benchmarks,
         )
-    resolved_stopgrams = _resolve_stopgrams_path(cfg, stopgrams_path=stopgrams)
-    resolved_spaced = _resolve_spaced(cfg, spaced_path=spaced_seeds)
-    scan_cfg = ScanConfig(
+    scan_cfg = _scan_config_from_options(
+        opts,
+        cfg,
+        out_dir=out_dir_p,
         inputs=inputs,
-        text_key=text_key,
-        id_key=id_key,
         index_path=str(native_index),
-        ngram=cfg.ngram,
-        min_hits=cfg.min_hits,
-        min_coverage=cfg.min_coverage,
-        out_dir=str(out_dir_p),
-        workers=workers,
-        index_backend=index_backend,
-        max_return_records=max_return_records,
-        stopgrams_path=resolved_stopgrams,
-        spaced_path=resolved_spaced.path,
-        spaced_min_loci=resolved_spaced.min_loci,
-        spaced_ver_min_span=resolved_spaced.ver_min_span,
-        spaced_ver_identity=resolved_spaced.ver_identity,
-        gate_mode=gate_mode,
-        min_longest_run=min_longest_run,
-        boilerplate_threshold=boilerplate_threshold,
-    )
-    _validate_stopgrams_compatibility(
-        scan_cfg, allow_unverified_stopgrams=allow_unverified_stopgrams
-    )
-    _validate_spaced_compatibility(
-        scan_cfg, allow_unverified_spaced=allow_unverified_spaced
-    )
-    _validate_index_config_compatibility(
-        scan_cfg, allow_config_mismatch=allow_config_mismatch
     )
     _run_scan(scan_cfg, out_dir_p)
 

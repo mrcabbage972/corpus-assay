@@ -4,7 +4,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 # v2 adds per-item attribution evidence (item_hits) and spaced_item, emitted by
 # the scanner in item gate mode / union mode with an `.items` sidecar.
-DOC_RESULT_SCHEMA_VERSION = 2
+# v3 adds where in the record the sub-document came from: `field` (the text or
+# messages column), and for chat turns `role` and `turn`. Later additions are
+# optional fields under v3 (item_hits' item_ngrams / item_coverage /
+# field_hits / fields_matched; `exact_hits` and `channels`; the text evidence
+# choices_found / choices_total / numbers_total / numbers_matched / lcs_chars /
+# lcs_ratio on item_hits and exact_hits; `row_index` and `part`). Mirrors
+# DOC_RESULT_SCHEMA_VERSION in src/scan.rs.
+DOC_RESULT_SCHEMA_VERSION = 3
 
 
 class SourceHitOut(BaseModel):
@@ -23,6 +30,34 @@ class ItemHitOut(BaseModel):
     unique_hits: int = Field(default=0, ge=0)
     shared_hits: int = Field(default=0, ge=0)
     boilerplate_hits: int = Field(default=0, ge=0)
+    # v3: the item's indexed n-grams and the share of them the document holds.
+    item_ngrams: int | None = Field(default=None, ge=0)
+    item_coverage: float | None = Field(default=None, ge=0.0)
+    # v3, with an `.items` v2 sidecar: `[field_idx, hits]` per matched field of
+    # the item, and the matched fields' names. Absent for `.items` v1 sidecars.
+    field_hits: list[tuple[int, int]] = Field(default_factory=list)
+    fields_matched: list[str] = Field(default_factory=list)
+    # v3, with the exact channel or --confirm (the item text sidecar).
+    choices_found: int | None = Field(default=None, ge=0)
+    choices_total: int | None = Field(default=None, ge=0)
+    numbers_total: int | None = Field(default=None, ge=0)
+    numbers_matched: int | None = Field(default=None, ge=0)
+    lcs_chars: int | None = Field(default=None, ge=0)
+    lcs_ratio: float | None = Field(default=None, ge=0.0)
+
+
+class ExactHitOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: int = Field(ge=0)
+    # The matched field: always 0, the item's question.
+    field: int = Field(default=0, ge=0)
+    choices_found: int | None = Field(default=None, ge=0)
+    choices_total: int | None = Field(default=None, ge=0)
+    numbers_total: int | None = Field(default=None, ge=0)
+    numbers_matched: int | None = Field(default=None, ge=0)
+    lcs_chars: int | None = Field(default=None, ge=0)
+    lcs_ratio: float | None = Field(default=None, ge=0.0)
 
 
 class DocResult(BaseModel):
@@ -40,6 +75,21 @@ class DocResult(BaseModel):
     )
     # Protected item id the spaced channel verified against (spaced-only flags).
     spaced_item: int | None = None
+    # v3: the column the sub-document came from (a text key or the messages
+    # key) and, for chat turns, the turn's role and its index in the list.
+    field: str | None = None
+    role: str | None = None
+    turn: int | None = Field(default=None, ge=0)
+    # v3: index of the packed part within the field or turn (the `-part-<k>`
+    # of the doc id; absent without splitting) and the 0-based row of the
+    # record in its shard (for JSONL, among the non-blank lines). Absent in
+    # older records.
+    part: int | None = Field(default=None, ge=0)
+    row_index: int | None = Field(default=None, ge=0)
+    # v3, exact channel: items whose question occurs verbatim in the document.
+    exact_hits: list[ExactHitOut] = Field(default_factory=list)
+    # v3: the channels that flagged the document: "ngram", "spaced", "exact".
+    channels: list[str] = Field(default_factory=list)
 
     def normalized_doc_id(self) -> str:
         return str(self.doc_id)
