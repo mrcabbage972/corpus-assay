@@ -57,3 +57,10 @@ Useful targets:
    Zenodo's GitHub integration archives the GitHub Release and mints a DOI for that
    version. The concept DOI in `CITATION.cff` and the README badge covers all versions,
    so it doesn't change between releases.
+4. If the benchmark registry changed, refresh its Hugging Face copy from the released
+   version:
+
+   ```bash
+   uv run python scripts/export_registry_dataset.py --out /tmp/registry
+   hf upload cabbage972/corpus-assay-benchmark-registry /tmp/registry . --repo-type dataset
+   ```

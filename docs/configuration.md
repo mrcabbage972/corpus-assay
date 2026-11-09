@@ -58,7 +58,10 @@ Each registry entry indexes the split and the text an evaluation harness shows t
 model (not the label), pinned to a Hub commit, so `init-config` writes configs that pass
 the revision-pin check. `corpus-assay describe-benchmark <key>` prints an entry's spec,
 followed by its registry metadata as YAML comments: the split harnesses score, whether
-the dataset is gated, the share of short items, and notes.
+the dataset is gated, the share of short items, and notes. The registry is also
+published as a dataset on the Hugging Face Hub,
+[`cabbage972/corpus-assay-benchmark-registry`](https://huggingface.co/datasets/cabbage972/corpus-assay-benchmark-registry),
+for use outside corpus-assay.
 
 | Key | Dataset | Config | Split | Fields | Short items |
 | --- | --- | --- | --- | --- | ---: |

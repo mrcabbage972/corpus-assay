@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `scripts/export_registry_dataset.py` exports the benchmark registry as a Hugging Face
+  dataset (Parquet plus a dataset card), published as
+  [`cabbage972/corpus-assay-benchmark-registry`](https://huggingface.co/datasets/cabbage972/corpus-assay-benchmark-registry).
+
+### Changed
+
+- Package description, keywords and README opening now say what the tool is for:
+  benchmark decontamination of LLM pretraining data.
+
 ## [0.2.0] - 2026-11-02
 
 Closes issues #1–#14 from the benchmark-overlap audit: new `filter` and `selftest`

@@ -1,7 +1,7 @@
 <h1 align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/mrcabbage972/corpus-assay/main/docs/assets/logo-dark.svg">
-    <img alt="corpus-assay: audit benchmark overlap" src="https://raw.githubusercontent.com/mrcabbage972/corpus-assay/main/docs/assets/logo.svg" width="560">
+    <img alt="corpus-assay: benchmark decontamination for LLM pretraining data" src="https://raw.githubusercontent.com/mrcabbage972/corpus-assay/main/docs/assets/logo.svg" width="560">
   </picture>
 </h1>
 
@@ -10,13 +10,15 @@
   <a href="https://pypi.org/project/corpus-assay/"><img alt="PyPI" src="https://img.shields.io/pypi/v/corpus-assay.svg?logo=pypi&amp;logoColor=white"></a>
   <a href="https://pypi.org/project/corpus-assay/"><img alt="Python versions" src="https://img.shields.io/pypi/pyversions/corpus-assay.svg?logo=python&amp;logoColor=white"></a>
   <a href="https://github.com/mrcabbage972/corpus-assay/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
+  <a href="https://huggingface.co/datasets/cabbage972/corpus-assay-benchmark-registry"><img alt="Benchmark registry on Hugging Face" src="https://img.shields.io/badge/%F0%9F%A4%97%20datasets-benchmark%20registry-yellow"></a>
   <a href="https://doi.org/10.5281/zenodo.23125328"><img alt="DOI" src="https://zenodo.org/badge/DOI/10.5281/zenodo.23125328.svg"></a>
 </p>
 
-**Find benchmark contamination in LLM training corpora.** corpus-assay builds a hashed
-n-gram index from evaluation benchmarks, streams your Parquet/JSONL shards through a
-multi-process Rust scanner, and reports which documents overlap which benchmark, down to
-the individual test item.
+**LLM pretraining data / benchmark decontamination.** corpus-assay finds evaluation-benchmark
+text in LLM training corpora and removes it. It builds a hashed n-gram index from the
+benchmarks, streams your Parquet/JSONL shards through a multi-process Rust scanner,
+reports which documents overlap which benchmark, down to the individual test item, and
+writes cleaned shards.
 
 It answers one question: *does my training data contain text from the benchmarks I am
 going to report on?*
@@ -379,6 +381,7 @@ if __name__ == "__main__":  # required: scan workers are spawned processes
 ## Documentation
 
 - [Configuration reference](https://github.com/mrcabbage972/corpus-assay/blob/main/docs/configuration.md)
+- [Benchmark registry on Hugging Face](https://huggingface.co/datasets/cabbage972/corpus-assay-benchmark-registry): the built-in registry as a dataset
 - [How matching works](https://github.com/mrcabbage972/corpus-assay/blob/main/docs/how-it-works.md)
 - [Output and file formats](https://github.com/mrcabbage972/corpus-assay/blob/main/docs/outputs.md)
 - [CLI reference](https://github.com/mrcabbage972/corpus-assay/blob/main/docs/cli.md)
