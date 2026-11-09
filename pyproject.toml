@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "corpus-assay"
 dynamic = ["version"]
-description = "Fast, auditable n-gram detection of benchmark contamination in LLM training corpora (Rust-accelerated)."
+description = "Benchmark decontamination for LLM pretraining data: fast, auditable n-gram detection and removal of evaluation-benchmark text in training corpora (Rust-accelerated)."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
@@ -13,12 +13,21 @@ license-files = ["LICENSE"]
 authors = [{ name = "Victor May" }]
 keywords = [
     "llm",
+    "pretraining",
+    "pretraining-data",
+    "training-data",
     "evaluation",
     "contamination",
     "decontamination",
+    "data-contamination",
+    "benchmark-contamination",
+    "test-set-contamination",
     "benchmark",
     "n-gram",
     "data-quality",
+    "data-curation",
+    "huggingface",
+    "nlp",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -48,6 +57,7 @@ Homepage = "https://github.com/mrcabbage972/corpus-assay"
 Documentation = "https://github.com/mrcabbage972/corpus-assay/tree/main/docs"
 Issues = "https://github.com/mrcabbage972/corpus-assay/issues"
 Changelog = "https://github.com/mrcabbage972/corpus-assay/blob/main/CHANGELOG.md"
+"Benchmark registry" = "https://huggingface.co/datasets/cabbage972/corpus-assay-benchmark-registry"
 
 [project.scripts]
 corpus-assay = "corpus_assay.cli:main"
