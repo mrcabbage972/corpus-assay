@@ -21,6 +21,7 @@ from corpus_assay.benchmark_spec import BenchmarkSpec
 from corpus_assay.benchmarks import _field_texts
 from corpus_assay.config import ScanConfig
 from corpus_assay.indexing import build_index, write_native_index_artifacts
+from corpus_assay.scanner import runner as scan_runner, worker as scan_worker
 from corpus_assay.scanner.fingerprint import build_run_fingerprint
 from corpus_assay.scanner.layout import OutputLayout
 from corpus_assay.scanner.runner import do_scan
@@ -224,6 +225,266 @@ def test_failed_range_keeps_parts_and_resume_completes(
     # A finished shard is not planned again.
     again = plan_scan_tasks([shard], cfg, fingerprint)
     assert again.tasks == [] and len(again.done) == 1
+
+
+@pytest.fixture
+def scanned_ranges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[int, int] | None]:
+    """Observe real scans, including cache misses, with deterministic completion order.
+
+    Only the pool is in-process: workers, native scanning and merging are real.
+    Reverse completion order exercises record ordering and earliest-best ties.
+    """
+    scanned: list[tuple[int, int] | None] = []
+    original = scan_worker.scan_file
+
+    def observe(file_path, cfg, layout, **kwargs):
+        scanned.append(kwargs.get("row_groups"))
+        return original(file_path, cfg, layout, **kwargs)
+
+    class InlinePool:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def imap_unordered(self, func, tasks):
+            for task in reversed(list(tasks)):
+                yield func(task)
+
+    class InlineContext:
+        def Pool(self, processes, initializer=None, initargs=()):
+            if initializer is not None:
+                initializer(*initargs)
+            return InlinePool()
+
+    monkeypatch.setattr(scan_worker, "scan_file", observe)
+    monkeypatch.setattr(scan_runner, "get_context", lambda _: InlineContext())
+    return scanned
+
+
+@pytest.mark.parametrize("max_records", [None, 2])
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        pytest.param({"workers": 2}, {"workers": 4}, id="more-workers"),
+        pytest.param({"workers": 4}, {"workers": 2}, id="fewer-workers"),
+        pytest.param({"rows_per_task": 20}, {"rows_per_task": 10}, id="smaller-tasks"),
+        pytest.param({"rows_per_task": 10}, {"rows_per_task": 20}, id="larger-tasks"),
+        pytest.param(
+            {"rows_per_task": 10}, {"rows_per_task": 0}, id="splitting-disabled"
+        ),
+        pytest.param({"workers": 4}, {"workers": 1}, id="single-worker"),
+        pytest.param(
+            {"rows_per_task": 10}, {"rows_per_task": 1000}, id="one-large-task"
+        ),
+    ],
+)
+def test_resume_after_parallelism_change_reuses_completed_rows(
+    index: str,
+    tmp_path: Path,
+    scanned_ranges: list[tuple[int, int] | None],
+    before: dict[str, int],
+    after: dict[str, int],
+    max_records: int | None,
+) -> None:
+    # 32 row groups ensure that both auto worker counts produce different plans.
+    rows = 160
+    shard = _write_shard(tmp_path / "shard.parquet", rows=rows)
+    cfg = _cfg(
+        index, shard, tmp_path / "resume", max_return_records=max_records, **before
+    )
+    resumed = _cfg(
+        index, shard, tmp_path / "resume", max_return_records=max_records, **after
+    )
+    fingerprint = build_run_fingerprint(cfg)
+    assert build_run_fingerprint(resumed) == fingerprint
+    ranges = plan_scan_tasks([shard], cfg, fingerprint).parts[shard]
+    new_plan = plan_scan_tasks([shard], resumed, fingerprint)
+    assert new_plan.tasks != [ScanTask(shard, r) for r in ranges]
+
+    # Completed work is scattered, as it is with unordered pool results.
+    completed = ranges[1::2]
+    summaries = {
+        r: scan_one_file_worker(shard, cfg, fingerprint, row_groups=r)
+        for r in reversed(completed)
+    }
+    assert all(s.error is None for s in summaries.values())
+    summaries.update(
+        {
+            r: ScanSummary(file=shard.name, error="worker died")
+            for r in ranges
+            if r not in summaries
+        }
+    )
+    assert merge_part_outputs(shard, ranges, summaries, cfg, fingerprint).error
+    layout = OutputLayout(Path(cfg.out_dir))
+    assert not layout.summary_path(layout.stem_from_path(shard)).exists()
+
+    whole = _cfg(
+        index,
+        shard,
+        tmp_path / "whole",
+        rows_per_task=0,
+        max_return_records=max_records,
+    )
+    baseline = do_scan(whole, print_progress=False)
+    scanned_ranges.clear()
+    run = do_scan(resumed, print_progress=False)
+
+    assert run.ok_files == 1 and run.failed_files == 0
+    assert run.total_docs_scanned == baseline.total_docs_scanned == rows
+    assert run.total_contaminated == baseline.total_contaminated
+    assert run.total_contaminated_by_channel == baseline.total_contaminated_by_channel
+    assert _outputs(resumed, shard) == _outputs(whole, shard)
+
+    all_groups = set(range(rows // ROW_GROUP_SIZE))
+    completed_groups = {i for start, end in completed for i in range(start, end)}
+    actual_groups = sorted(
+        i
+        for bounds in scanned_ranges
+        for i in (range(*bounds) if bounds is not None else sorted(all_groups))
+    )
+    # A worker call which reuses its summary is not a scan. Every uncovered row
+    # group must actually be scanned once, and no finished row group again.
+    assert (actual_groups, layout.parts_dir.exists()) == (
+        sorted(all_groups - completed_groups),
+        False,
+    )
+
+    scanned_ranges.clear()
+    assert do_scan(resumed, print_progress=False).ok_files == 1
+    assert scanned_ranges == []
+    assert not layout.parts_dir.exists()
+
+
+def test_resume_with_overlapping_old_parts_does_not_double_count(
+    index: str,
+    tmp_path: Path,
+    scanned_ranges: list[tuple[int, int] | None],
+) -> None:
+    shard = _write_shard(tmp_path / "shard.parquet")
+    cfg = _cfg(index, shard, tmp_path / "resume", rows_per_task=5)
+    fingerprint = build_run_fingerprint(cfg)
+    # Older versions can leave overlapping completed ranges after interrupting
+    # two runs that used different task sizes. Never merge overlapping totals.
+    # Keeping (0, 3) greedily would throw away reusable work in (2, 4).
+    for bounds in [(0, 3), (0, 2), (2, 4), (4, 6)]:
+        summary = scan_one_file_worker(shard, cfg, fingerprint, row_groups=bounds)
+        assert summary.error is None
+
+    whole = _cfg(index, shard, tmp_path / "whole", rows_per_task=0)
+    do_scan(whole, print_progress=False)
+    scanned_ranges.clear()
+    run = do_scan(cfg, print_progress=False)
+    assert run.ok_files == 1 and run.total_docs_scanned == ROWS
+    assert _outputs(cfg, shard) == _outputs(whole, shard)
+    assert None not in scanned_ranges
+    assert sorted(i for bounds in scanned_ranges if bounds for i in range(*bounds)) == [
+        6,
+        7,
+    ]
+    assert not OutputLayout(Path(cfg.out_dir)).parts_dir.exists()
+
+
+@pytest.mark.parametrize("rows_per_task", [0, 5])
+def test_finished_shard_cleans_leftover_parts_without_rescanning(
+    index: str,
+    tmp_path: Path,
+    scanned_ranges: list[tuple[int, int] | None],
+    rows_per_task: int,
+) -> None:
+    shard = _write_shard(tmp_path / "shard.parquet")
+    cfg = _cfg(index, shard, tmp_path / "out", rows_per_task=rows_per_task)
+    fingerprint = build_run_fingerprint(cfg)
+    assert scan_one_file_worker(shard, cfg, fingerprint).error is None
+    expected = _outputs(cfg, shard)
+    # Model a crash after the final summary was written but before cleanup.
+    assert (
+        scan_one_file_worker(shard, cfg, fingerprint, row_groups=(0, 2)).error is None
+    )
+    layout = OutputLayout(Path(cfg.out_dir))
+    assert layout.parts_dir.exists()
+
+    scanned_ranges.clear()
+    assert do_scan(cfg, print_progress=False).ok_files == 1
+    assert scanned_ranges == []
+    assert _outputs(cfg, shard) == expected
+    assert not layout.parts_dir.exists()
+
+
+def test_auto_resume_reuses_parts_after_another_shard_finishes(
+    index: str,
+    tmp_path: Path,
+    scanned_ranges: list[tuple[int, int] | None],
+) -> None:
+    rows = 160
+    pending = _write_shard(tmp_path / "pending.parquet", rows=rows)
+    finished = _write_shard(tmp_path / "finished.parquet", rows=rows)
+    inputs = [str(pending), str(finished)]
+    cfg = _cfg(index, pending, tmp_path / "resume", inputs=inputs, workers=2)
+    fingerprint = build_run_fingerprint(cfg)
+    ranges = plan_scan_tasks([pending, finished], cfg, fingerprint).parts[pending]
+    completed = ranges[1::2]
+    for bounds in completed:
+        assert (
+            scan_one_file_worker(pending, cfg, fingerprint, row_groups=bounds).error
+            is None
+        )
+    assert scan_one_file_worker(finished, cfg, fingerprint).error is None
+
+    # Same settings, but half the rows now have a final summary. Auto sizing
+    # must not make the pending shard's valid, wider ranges disappear.
+    whole = _cfg(index, pending, tmp_path / "whole", inputs=inputs, rows_per_task=0)
+    do_scan(whole, print_progress=False)
+    scanned_ranges.clear()
+    run = do_scan(cfg, print_progress=False)
+    assert run.ok_files == 2 and run.failed_files == 0
+    assert run.total_docs_scanned == 2 * rows
+    for shard in (pending, finished):
+        assert _outputs(cfg, shard) == _outputs(whole, shard)
+    expected = set(range(rows // ROW_GROUP_SIZE)) - {
+        i for start, end in completed for i in range(start, end)
+    }
+    assert None not in scanned_ranges
+    assert sorted(
+        i for bounds in scanned_ranges if bounds for i in range(*bounds)
+    ) == sorted(expected)
+    assert not OutputLayout(Path(cfg.out_dir)).parts_dir.exists()
+
+
+@pytest.mark.parametrize("rows_per_task", [0, 5])
+def test_resume_does_not_reuse_parts_from_a_different_fingerprint(
+    index: str,
+    tmp_path: Path,
+    scanned_ranges: list[tuple[int, int] | None],
+    rows_per_task: int,
+) -> None:
+    shard = _write_shard(tmp_path / "shard.parquet")
+    old = _cfg(index, shard, tmp_path / "resume", rows_per_task=10, min_hits=1000)
+    fingerprint = build_run_fingerprint(old)
+    ranges = plan_scan_tasks([shard], old, fingerprint).parts[shard]
+    for bounds in ranges[:-1]:
+        assert (
+            scan_one_file_worker(shard, old, fingerprint, row_groups=bounds).error
+            is None
+        )
+
+    cfg = _cfg(index, shard, tmp_path / "resume", rows_per_task=rows_per_task)
+    assert build_run_fingerprint(cfg) != fingerprint
+    whole = _cfg(index, shard, tmp_path / "whole", rows_per_task=0)
+    do_scan(whole, print_progress=False)
+    scanned_ranges.clear()
+    assert do_scan(cfg, print_progress=False).ok_files == 1
+    assert _outputs(cfg, shard) == _outputs(whole, shard)
+    assert sorted(
+        i
+        for bounds in scanned_ranges
+        for i in range(*(bounds if bounds is not None else (0, ROWS // ROW_GROUP_SIZE)))
+    ) == list(range(ROWS // ROW_GROUP_SIZE))
+    assert not OutputLayout(Path(cfg.out_dir)).parts_dir.exists()
 
 
 def test_split_row_groups() -> None:

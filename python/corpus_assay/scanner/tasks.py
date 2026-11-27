@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import logging
 import math
-import shutil
+import re
 import struct
+from bisect import bisect_right
 from collections.abc import Sequence
 from dataclasses import dataclass
+from itertools import accumulate
 from pathlib import Path
 from typing import Any
 
@@ -55,7 +57,7 @@ class ScanPlan:
     # Row-group ranges of each split shard, in order.
     parts: dict[Path, list[tuple[int, int]]]
     # Shards whose summary from an earlier run is still valid (only looked up
-    # when splitting is considered; otherwise each task checks its own).
+    # when splitting or resuming parts; otherwise each task checks its own).
     done: list[ScanSummary]
 
 
@@ -92,36 +94,116 @@ def _row_group_rows(path: Path) -> list[int] | None:
     return [meta.row_group(i).num_rows for i in range(meta.num_row_groups)]
 
 
+def _completed_ranges(
+    layout: OutputLayout,
+    stem: str,
+    rows: Sequence[int],
+    run_fingerprint: dict[str, Any],
+) -> list[tuple[int, int]]:
+    """Reuse the most completed rows without merging overlapping checkpoints.
+
+    Earlier runs may have left parts from several different task sizes. Their
+    aggregate outputs cannot be clipped, so choose whole, disjoint ranges.
+    """
+    candidates: list[tuple[int, int]] = []
+    for path in (layout.parts_dir / stem).glob("rg*-*"):
+        match = re.fullmatch(r"rg(\d+)-(\d+)", path.name)
+        if match is None:
+            continue
+        start, end = map(int, match.groups())
+        if not 0 <= start < end <= len(rows):
+            continue
+        part = layout.part_layout(stem, (start, end))
+        if part.out_dir != path:  # only the canonical path the worker will read
+            continue
+        summary = try_read_existing_summary(part.summary_path(stem), run_fingerprint)
+        if summary is not None and summary.error is None:
+            candidates.append((start, end))
+
+    # Weighted interval scheduling: greedy selection can discard a set of
+    # smaller checkpoints that together cover more rows than one larger part.
+    candidates.sort(key=lambda r: (r[1], r[0]))
+    offsets = list(accumulate(rows, initial=0))
+    ends = [end for _, end in candidates]
+    previous: list[int] = []
+    best = [0]
+    for i, (start, end) in enumerate(candidates):
+        j = bisect_right(ends, start, hi=i)
+        previous.append(j)
+        best.append(max(best[-1], best[j] + offsets[end] - offsets[start]))
+    selected: list[tuple[int, int]] = []
+    i = len(candidates)
+    while i:
+        if best[i] == best[i - 1]:
+            i -= 1
+        else:
+            selected.append(candidates[i - 1])
+            i = previous[i - 1]
+    return selected[::-1]
+
+
+def _resume_ranges(
+    rows: Sequence[int],
+    completed: list[tuple[int, int]],
+    target_rows: int | None,
+) -> list[tuple[int, int]]:
+    """Keep completed boundaries and split only the gaps, in file order.
+
+    With splitting disabled, each gap stays one task; completed parts still
+    need merging, but none of their rows need scanning again.
+    """
+    ranges: list[tuple[int, int]] = []
+    start = 0
+    for left, right in [*completed, (len(rows), len(rows))]:
+        if start < left:
+            gap = (
+                split_row_groups(rows[start:left], target_rows)
+                if target_rows is not None
+                else [(0, left - start)]
+            )
+            ranges.extend((start + a, start + b) for a, b in gap)
+        if left < right:
+            ranges.append((left, right))
+        start = right
+    return ranges
+
+
 def plan_scan_tasks(
     files: list[Path], cfg: ScanConfig, run_fingerprint: dict[str, Any]
 ) -> ScanPlan:
     """Decide which shards to split and into which row-group ranges."""
     whole = ScanPlan(tasks=[ScanTask(f) for f in files], parts={}, done=[])
+    layout = OutputLayout(Path(cfg.out_dir))
     rows_per_task = cfg.rows_per_task
     target_tasks = cfg.workers * AUTO_TASKS_PER_WORKER
-    if rows_per_task == 0:
-        return whole
-    if rows_per_task is None and (cfg.workers <= 1 or len(files) >= target_tasks):
+    splitting = rows_per_task != 0 and not (
+        rows_per_task is None and (cfg.workers <= 1 or len(files) >= target_tasks)
+    )
+    if not splitting and not layout.parts_dir.exists():
         return whole
 
-    layout = OutputLayout(Path(cfg.out_dir))
     row_counts: dict[Path, list[int]] = {}
+    completed: dict[Path, list[tuple[int, int]]] = {}
     done: list[ScanSummary] = []
     finished: set[Path] = set()
     for f in files:
         if not f.name.endswith(".parquet"):
             continue
+        stem = layout.stem_from_path(f)
+        if not splitting and not (layout.parts_dir / stem).is_dir():
+            continue  # keep the no-footer fast path for fresh whole-shard scans
         # A shard already scanned under this fingerprint needs no task.
-        summary = try_read_existing_summary(
-            layout.summary_path(layout.stem_from_path(f)), run_fingerprint
-        )
+        summary = try_read_existing_summary(layout.summary_path(stem), run_fingerprint)
         if summary is not None:
+            if summary.error is None:
+                layout.remove_parts(stem)
             done.append(summary)
             finished.add(f)
             continue
         rows = _row_group_rows(f)
         if rows is not None:
             row_counts[f] = rows
+            completed[f] = _completed_ranges(layout, stem, rows, run_fingerprint)
 
     if rows_per_task is None:
         total = sum(sum(rows) for rows in row_counts.values())
@@ -134,12 +216,16 @@ def plan_scan_tasks(
         if f in finished:
             continue
         rows = row_counts.get(f)
-        ranges = split_row_groups(rows, rows_per_task) if rows else []
-        if len(ranges) > 1:
+        saved = completed.get(f, [])
+        if rows and saved:
+            ranges = _resume_ranges(rows, saved, rows_per_task if splitting else None)
+        else:
+            ranges = split_row_groups(rows, rows_per_task) if rows and splitting else []
+        if saved or len(ranges) > 1:
             parts[f] = ranges
             tasks.extend(ScanTask(f, r) for r in ranges)
             continue
-        if rows and len(rows) == 1 and rows[0] >= 2 * rows_per_task:
+        if splitting and rows and len(rows) == 1 and rows[0] >= 2 * rows_per_task:
             unsplittable.append(f.name)
         tasks.append(ScanTask(f))
 
@@ -265,9 +351,5 @@ def merge_part_outputs(
     )
     write_summary(layout.summary_path(stem), summary)
 
-    shutil.rmtree(layout.parts_dir / stem, ignore_errors=True)
-    try:
-        layout.parts_dir.rmdir()  # only once every split shard is merged
-    except OSError:
-        pass
+    layout.remove_parts(stem)
     return summary

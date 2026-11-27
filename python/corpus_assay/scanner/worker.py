@@ -280,6 +280,8 @@ def scan_one_file_worker(
 
     existing = try_read_existing_summary(summary_path, run_fingerprint)
     if existing is not None:
+        if row_groups is None and existing.error is None:
+            layout.remove_parts(stem)
         return existing
 
     layout.ensure_dirs()
@@ -306,4 +308,6 @@ def scan_one_file_worker(
         channel_counts=channels,
     )
     write_summary(summary_path, summary)
+    if row_groups is None:
+        layout.remove_parts(stem)
     return summary
