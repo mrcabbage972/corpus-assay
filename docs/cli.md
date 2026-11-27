@@ -246,6 +246,7 @@ $ corpus-assay scan [OPTIONS]
 * `--messages-key <str>`: Chat column holding a list of {role, content} messages; each turn is scanned as its own document and records carry its role and turn index.
 * `--id-key <str>`: Optional stable doc id field (otherwise hashed from text).
 * `--workers <int>`: Parallel worker processes.  [default: (CPU count)]
+* `--rows-per-task <int range>`: Split Parquet shards into row-group ranges of about this many rows, each scanned by its own worker, so a few large shards still use every worker. Default: split only when there are fewer than 4 x --workers shards. 0: one task per shard. Outputs are the same either way.  [default: (auto); x&gt;=0]
 * `--index-backend <str>`: Index backend: auto, memory, or mmap.  [default: auto]
 * `--no-split`: Do not split records on the packed-document separator (&lt;|endoftext|&gt; and its typo variant): each record is one document, and doc ids get no -part-&lt;k&gt; suffix. Use for chat data or decoded text that may legitimately contain the token.
 * `--gate-mode <str>`: Contamination gate. &#x27;union&#x27; (default) flags a document when its matches across the whole index clear min_hits/min_coverage, with per-item attribution when an .items sidecar is present. &#x27;item&#x27; is stricter: a single protected item must clear them on its own (needs the .items sidecar). &#x27;auto&#x27; is an alias for &#x27;union&#x27;.  [default: union]
@@ -289,6 +290,7 @@ $ corpus-assay filter [OPTIONS]
 * `--messages-key <str>`: Chat column holding a list of {role, content} messages; each turn is scanned as its own document and records carry its role and turn index.
 * `--id-key <str>`: Optional stable doc id field (otherwise hashed from text).
 * `--workers <int>`: Parallel worker processes.  [default: (CPU count)]
+* `--rows-per-task <int range>`: Split Parquet shards into row-group ranges of about this many rows, each scanned by its own worker, so a few large shards still use every worker. Default: split only when there are fewer than 4 x --workers shards. 0: one task per shard. Outputs are the same either way.  [default: (auto); x&gt;=0]
 * `--index-backend <str>`: Index backend: auto, memory, or mmap.  [default: auto]
 * `--no-split`: Do not split records on the packed-document separator (&lt;|endoftext|&gt; and its typo variant): each record is one document, and doc ids get no -part-&lt;k&gt; suffix. Use for chat data or decoded text that may legitimately contain the token.
 * `--gate-mode <str>`: Contamination gate. &#x27;union&#x27; (default) flags a document when its matches across the whole index clear min_hits/min_coverage, with per-item attribution when an .items sidecar is present. &#x27;item&#x27; is stricter: a single protected item must clear them on its own (needs the .items sidecar). &#x27;auto&#x27; is an alias for &#x27;union&#x27;.  [default: union]
@@ -337,6 +339,7 @@ $ corpus-assay selftest [OPTIONS]
 * `--messages-key <str>`: Chat column holding a list of {role, content} messages; each turn is scanned as its own document and records carry its role and turn index.
 * `--id-key <str>`: Optional stable doc id field (otherwise hashed from text).
 * `--workers <int>`: Parallel worker processes.  [default: (CPU count)]
+* `--rows-per-task <int range>`: Split Parquet shards into row-group ranges of about this many rows, each scanned by its own worker, so a few large shards still use every worker. Default: split only when there are fewer than 4 x --workers shards. 0: one task per shard. Outputs are the same either way.  [default: (auto); x&gt;=0]
 * `--index-backend <str>`: Index backend: auto, memory, or mmap.  [default: auto]
 * `--no-split`: Do not split records on the packed-document separator (&lt;|endoftext|&gt; and its typo variant): each record is one document, and doc ids get no -part-&lt;k&gt; suffix. Use for chat data or decoded text that may legitimately contain the token.
 * `--gate-mode <str>`: Contamination gate. &#x27;union&#x27; (default) flags a document when its matches across the whole index clear min_hits/min_coverage, with per-item attribution when an .items sidecar is present. &#x27;item&#x27; is stricter: a single protected item must clear them on its own (needs the .items sidecar). &#x27;auto&#x27; is an alias for &#x27;union&#x27;.  [default: union]
@@ -384,6 +387,7 @@ $ corpus-assay run-hf [OPTIONS]
 * `--messages-key <str>`: Chat column holding a list of {role, content} messages; each turn is scanned as its own document and records carry its role and turn index.
 * `--id-key <str>`: Optional stable doc id field (otherwise hashed from text).
 * `--workers <int>`: Parallel worker processes.  [default: (CPU count)]
+* `--rows-per-task <int range>`: Split Parquet shards into row-group ranges of about this many rows, each scanned by its own worker, so a few large shards still use every worker. Default: split only when there are fewer than 4 x --workers shards. 0: one task per shard. Outputs are the same either way.  [default: (auto); x&gt;=0]
 * `--index-backend <str>`: Index backend: auto, memory, or mmap.  [default: auto]
 * `--no-split`: Do not split records on the packed-document separator (&lt;|endoftext|&gt; and its typo variant): each record is one document, and doc ids get no -part-&lt;k&gt; suffix. Use for chat data or decoded text that may legitimately contain the token.
 * `--gate-mode <str>`: Contamination gate. &#x27;union&#x27; (default) flags a document when its matches across the whole index clear min_hits/min_coverage, with per-item attribution when an .items sidecar is present. &#x27;item&#x27; is stricter: a single protected item must clear them on its own (needs the .items sidecar). &#x27;auto&#x27; is an alias for &#x27;union&#x27;.  [default: union]
@@ -428,6 +432,7 @@ $ corpus-assay run [OPTIONS]
 * `--messages-key <str>`: Chat column holding a list of {role, content} messages; each turn is scanned as its own document and records carry its role and turn index.
 * `--id-key <str>`: Optional stable doc id field (otherwise hashed from text).
 * `--workers <int>`: Parallel worker processes.  [default: (CPU count)]
+* `--rows-per-task <int range>`: Split Parquet shards into row-group ranges of about this many rows, each scanned by its own worker, so a few large shards still use every worker. Default: split only when there are fewer than 4 x --workers shards. 0: one task per shard. Outputs are the same either way.  [default: (auto); x&gt;=0]
 * `--index-backend <str>`: Index backend: auto, memory, or mmap.  [default: auto]
 * `--no-split`: Do not split records on the packed-document separator (&lt;|endoftext|&gt; and its typo variant): each record is one document, and doc ids get no -part-&lt;k&gt; suffix. Use for chat data or decoded text that may legitimately contain the token.
 * `--gate-mode <str>`: Contamination gate. &#x27;union&#x27; (default) flags a document when its matches across the whole index clear min_hits/min_coverage, with per-item attribution when an .items sidecar is present. &#x27;item&#x27; is stricter: a single protected item must clear them on its own (needs the .items sidecar). &#x27;auto&#x27; is an alias for &#x27;union&#x27;.  [default: union]

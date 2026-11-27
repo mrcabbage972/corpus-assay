@@ -257,7 +257,8 @@ reproducible, and the `--exact-channel`, `--exact-min-chars` and `--confirm` /
 | `--text-key` | `text` | Text column; repeat it to scan several (each is its own document). |
 | `--messages-key` | none | Chat column of `{role, content}` turns; each turn is its own document. |
 | `--id-key` | none | Id column (any type castable to string). Without an id, records use a hash of the text. |
-| `--workers` | CPU count | Worker processes (one shard at a time each). |
+| `--workers` | CPU count | Worker processes (one task at a time each: a shard, or a row-group range of one). |
+| `--rows-per-task` | auto | Split Parquet shards into contiguous row-group ranges of about this many rows, each its own task, so a few large shards still keep every worker busy. Auto splits only when there are fewer than 4 × `--workers` shards, into about 4 × `--workers` tasks; `0` scans each shard as one task. Each shard's outputs are the same however it is split. A shard with a single row group cannot be split (the scan warns); JSONL shards are always one task. |
 | `--index-backend` | `auto` | `memory` or `mmap`; `auto` uses mmap when `workers > 1`. |
 | `--gate-mode` | `union` | `union` or `item` (see [how-it-works.md](how-it-works.md)). |
 | `--min-longest-run` | `0` | Item gate only: also require a contiguous shared run of N tokens. |

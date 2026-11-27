@@ -1163,13 +1163,41 @@ impl MessagesColumn {
 }
 
 /// Scan a Parquet reader (must be Read+Seek) for contamination.
-fn scan_reader<R>(reader: R, cfg: PreparedScan, limits: ScanLimits) -> Result<ScanOutput, String>
+///
+/// `row_groups`, when given, is a half-open range `[start, end)` of the file's
+/// row groups: only those are read, and `row_index` in the records stays the
+/// row's position in the whole file, so scanning a file in row-group ranges gives
+/// the same records as scanning it whole.
+fn scan_reader<R>(
+    reader: R,
+    cfg: PreparedScan,
+    limits: ScanLimits,
+    row_groups: Option<(usize, usize)>,
+) -> Result<ScanOutput, String>
 where
     R: ChunkReader + 'static,
 {
-    let mut arrow_reader = ParquetRecordBatchReaderBuilder::try_new(reader)
-        .and_then(|b| b.with_batch_size(1024).build())
-        .map_err(|e| e.to_string())?;
+    let mut builder = ParquetRecordBatchReaderBuilder::try_new(reader)
+        .map_err(|e| e.to_string())?
+        .with_batch_size(1024);
+    let mut row_offset: u64 = 0;
+    if let Some((start, end)) = row_groups {
+        let groups = builder.metadata().row_groups();
+        if start > end || end > groups.len() {
+            return Err(format!(
+                "Row-group range {}..{} is out of bounds for a file with {} row groups",
+                start,
+                end,
+                groups.len()
+            ));
+        }
+        row_offset = groups[..start]
+            .iter()
+            .map(|rg| rg.num_rows().max(0) as u64)
+            .sum();
+        builder = builder.with_row_groups((start..end).collect());
+    }
+    let mut arrow_reader = builder.build().map_err(|e| e.to_string())?;
 
     let schema = arrow_reader.schema();
     let mut text_cols: Vec<(&str, usize)> = Vec::with_capacity(cfg.text_keys.len());
@@ -1209,7 +1237,6 @@ where
         item_best: HashMap::new(),
     };
 
-    let mut row_offset: u64 = 0;
     for batch_result in arrow_reader.by_ref() {
         let batch: RecordBatch = batch_result.map_err(|e| e.to_string())?;
         let batch_offset = row_offset;
@@ -1570,7 +1597,7 @@ fn pyfile_to_tempfile(obj: &Bound<'_, PyAny>) -> PyResult<File> {
 
 #[allow(clippy::too_many_arguments)]
 #[pyfunction]
-#[pyo3(signature = (input, text_key, id_key, index_path, n, min_hits, min_coverage, index_backend="auto", out_hits_path=None, packed_doc_sep=Some("<|endoftext|>"), packed_doc_sep_typo=Some("<|endoftext}>"), max_return_records=Some(500), stopgrams_path=None, gate_mode="auto", min_longest_run=0, spaced_path=None, spaced_min_loci=3, spaced_ver_min_span=17, spaced_ver_identity=0.85, boilerplate_threshold=50, messages_key=None, min_item_coverage=0.0, out_item_best_path=None, exact_channel="off", exact_min_chars=12, confirm=false, channel_counts=None))]
+#[pyo3(signature = (input, text_key, id_key, index_path, n, min_hits, min_coverage, index_backend="auto", out_hits_path=None, packed_doc_sep=Some("<|endoftext|>"), packed_doc_sep_typo=Some("<|endoftext}>"), max_return_records=Some(500), stopgrams_path=None, gate_mode="auto", min_longest_run=0, spaced_path=None, spaced_min_loci=3, spaced_ver_min_span=17, spaced_ver_identity=0.85, boilerplate_threshold=50, messages_key=None, min_item_coverage=0.0, out_item_best_path=None, exact_channel="off", exact_min_chars=12, confirm=false, channel_counts=None, row_groups=None))]
 pub fn scan_stream_rust(
     py: Python<'_>,
     input: Bound<'_, PyAny>,
@@ -1600,6 +1627,7 @@ pub fn scan_stream_rust(
     exact_min_chars: usize,
     confirm: bool,
     channel_counts: Option<Bound<'_, PyDict>>,
+    row_groups: Option<(usize, usize)>,
 ) -> PyResult<(usize, usize, Vec<String>, usize)> {
     // `text_key` is one column name or a list of them.
     let text_keys: Vec<String> = if text_key.is_instance_of::<PyString>() {
@@ -1645,8 +1673,16 @@ pub fn scan_stream_rust(
         max_return_records: max_return_records.filter(|&limit| limit > 0),
     };
 
-    let temp_file = pyfile_to_tempfile(&input)?;
-    let file_processing_result = py.detach(move || scan_reader(temp_file, cfg, limits));
+    // A path is opened in place; a file-like object is copied to a temporary file
+    // first (the Parquet reader needs to seek).
+    let file = if let Ok(path) = input.extract::<std::path::PathBuf>() {
+        File::open(&path).map_err(|e| {
+            PyValueError::new_err(format!("Failed to open '{}': {}", path.display(), e))
+        })?
+    } else {
+        pyfile_to_tempfile(&input)?
+    };
+    let file_processing_result = py.detach(move || scan_reader(file, cfg, limits, row_groups));
 
     match file_processing_result {
         Ok((scanned, contaminated, records, empty, by_channel)) => {

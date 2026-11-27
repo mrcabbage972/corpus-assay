@@ -1,5 +1,7 @@
 import io
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any
 
@@ -51,11 +53,14 @@ def scan_file(
     cfg: ScanConfig,
     layout: OutputLayout,
     channel_counts: dict[str, int] | None = None,
+    row_groups: tuple[int, int] | None = None,
 ) -> tuple[int, int, int, list[str]]:
     """Scan one shard: ``(scanned, contaminated, empty_after_filter, records)``.
 
     ``channel_counts``, when given, receives the flagged sub-documents per
-    enabled channel (``ngram``, ``spaced``, ``exact``).
+    enabled channel (``ngram``, ``spaced``, ``exact``). ``row_groups=(start,
+    end)`` scans only that range of a Parquet shard's row groups; record row
+    indexes still count from the start of the shard.
     """
     stem = layout.stem_from_path(file_path)
     hits_path = layout.per_hits_path(stem)
@@ -65,9 +70,11 @@ def scan_file(
     index_backend = _resolve_index_backend(cfg)
     counts: dict[str, int] = {}
 
-    with _open_scan_input(file_path, cfg) as f:
+    # Warn about unscanned columns once per shard, not once per row-group range.
+    warn = row_groups is None or row_groups[0] == 0
+    with _scan_input(file_path, cfg, row_groups=row_groups, warn=warn) as source:
         scanned, contaminated, json_results, empty_after_filter = scan_stream_rust(
-            input=f,
+            input=source,
             text_key=cfg.text_keys,
             messages_key=cfg.messages_key,
             id_key=cfg.id_key,
@@ -94,6 +101,7 @@ def scan_file(
             exact_min_chars=cfg.exact_min_chars,
             confirm=cfg.confirm,
             channel_counts=counts,
+            row_groups=row_groups,
         )
 
     if channel_counts is not None:
@@ -101,20 +109,33 @@ def scan_file(
     return int(scanned), int(contaminated), int(empty_after_filter), list(json_results)
 
 
-def _open_scan_input(file_path: Path, cfg: ScanConfig) -> IO[bytes]:
-    """Open a shard as the Parquet byte stream the Rust scanner reads.
+@contextmanager
+def _scan_input(
+    file_path: Path,
+    cfg: ScanConfig,
+    *,
+    row_groups: tuple[int, int] | None = None,
+    warn: bool = True,
+) -> Iterator[str | IO[bytes]]:
+    """The input the Rust scanner reads for a shard.
 
-    Parquet passes through untouched. JSONL (optionally ``.gz`` / ``.zst``) is
-    loaded into memory and re-encoded as Parquet, keeping only the text,
-    messages and id columns. Either way, string columns the scan does not read
-    are reported once per file (see ``warn_unscanned_columns``).
+    A Parquet shard is passed by path, so Rust reads it in place (and only the
+    requested row groups). JSONL (optionally ``.gz`` / ``.zst``) is loaded into
+    memory and re-encoded as Parquet, keeping only the text, messages and id
+    columns; it is always scanned whole. With ``warn``, string columns the scan
+    does not read are reported (see ``warn_unscanned_columns``).
     """
     if file_path.name.endswith(".parquet"):
-        import pyarrow.parquet as pq
+        if warn:
+            import pyarrow.parquet as pq
 
-        warn_unscanned_columns(pq.read_schema(file_path), cfg, file_path.name)
-        return file_path.open("rb")
-    return _jsonl_as_parquet(file_path, cfg)
+            warn_unscanned_columns(pq.read_schema(file_path), cfg, file_path.name)
+        yield str(file_path)
+        return
+    if row_groups is not None:
+        raise ValueError(f"{file_path.name}: only Parquet shards can be split")
+    with _jsonl_as_parquet(file_path, cfg) as buffer:
+        yield buffer
 
 
 def _jsonl_as_parquet(file_path: Path, cfg: ScanConfig) -> io.BytesIO:
@@ -237,10 +258,23 @@ def build_scan_summary(
 
 
 def scan_one_file_worker(
-    file_path: Path, cfg: ScanConfig, run_fingerprint: dict[str, Any]
+    file_path: Path,
+    cfg: ScanConfig,
+    run_fingerprint: dict[str, Any],
+    row_groups: tuple[int, int] | None = None,
 ) -> ScanSummary:
+    """Scan a shard, or one row-group range of it, and write its outputs.
+
+    A whole shard writes to the run's output layout. A range writes to its own
+    layout under ``_parts/`` (see ``OutputLayout.part_layout``), which
+    ``merge_part_outputs`` combines into the shard's outputs once every range
+    is done. Either way an existing summary scanned under the same fingerprint
+    is reused.
+    """
     layout = OutputLayout(Path(cfg.out_dir))
     stem = layout.stem_from_path(file_path)
+    if row_groups is not None:
+        layout = layout.part_layout(stem, row_groups)
     hits_path = layout.per_hits_path(stem)
     summary_path = layout.summary_path(stem)
 
@@ -253,7 +287,7 @@ def scan_one_file_worker(
     try:
         channels: dict[str, int] = {}
         scanned, contaminated, empty_after_filter, json_results = scan_file(
-            file_path, cfg, layout, channel_counts=channels
+            file_path, cfg, layout, channel_counts=channels, row_groups=row_groups
         )
     except Exception as e:
         return ScanSummary(file=file_path.name, error=str(e))

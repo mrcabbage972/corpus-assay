@@ -8,12 +8,25 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Parquet shards are split across workers by row group, so a run over a few large
+  shards uses every worker without splitting the files by hand. By default a scan
+  splits when there are fewer than 4 shards per worker, into about 4 tasks per
+  worker; `--rows-per-task N` (on `scan`, `run`, `run-hf`, `filter`, `selftest`)
+  sets the size and `--rows-per-task 0` turns it off. Each shard's outputs, record
+  `row_index` included, are the same however it is split; ranges are scanned into
+  `_parts/` and merged per shard. JSONL shards and single-row-group Parquet shards
+  are still scanned whole (the latter with a warning).
 - `scripts/export_registry_dataset.py` exports the benchmark registry as a Hugging Face
   dataset (Parquet plus a dataset card), published as
   [`cabbage972/corpus-assay-benchmark-registry`](https://huggingface.co/datasets/cabbage972/corpus-assay-benchmark-registry).
 
 ### Changed
 
+- Parquet shards are read in place instead of being copied to a temporary file
+  first.
+- `--workers` (and `--rows-per-task`) no longer enter the run fingerprint, so a
+  resumed run may use a different worker count. Runs started with an earlier
+  version re-scan their shards once when resumed.
 - Package description, keywords and README opening now say what the tool is for:
   benchmark decontamination of LLM pretraining data.
 

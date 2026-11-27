@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from functools import partial
 from multiprocessing import get_context
 from pathlib import Path
+from typing import Any, TypeVar
 
 from corpus_assay.config import ScanConfig
 from corpus_assay.constants import ITEMS_TEXT_SUFFIX
@@ -19,7 +20,10 @@ from corpus_assay.normalization import (
 )
 from corpus_assay.scanner.fingerprint import build_run_fingerprint
 from corpus_assay.scanner.schema import RunSummary, ScanSummary
+from corpus_assay.scanner.tasks import ScanTask, merge_part_outputs, plan_scan_tasks
 from corpus_assay.scanner.worker import scan_one_file_worker
+
+_T = TypeVar("_T")
 
 SUPPORTED_SCAN_EXTENSIONS = (".parquet", ".jsonl", ".jsonl.gz", ".jsonl.zst")
 
@@ -77,9 +81,7 @@ def _spawn_guard_marker() -> Iterator[Path]:
                 os.environ[_SPAWN_GUARD_ENV] = previous
 
 
-def _iter_pool_results(
-    results: Iterator[ScanSummary], marker: Path
-) -> Iterator[ScanSummary]:
+def _iter_pool_results(results: Iterator[_T], marker: Path) -> Iterator[_T]:
     """Yield pool results, raising if a worker reported an unguarded main script."""
     next_result = getattr(results, "next", None)  # multiprocessing IMapIterator
     if next_result is None:
@@ -93,6 +95,14 @@ def _iter_pool_results(
         except multiprocessing.TimeoutError:
             if marker.exists():
                 raise RuntimeError(MISSING_MAIN_GUARD_MESSAGE) from None
+
+
+def _run_task(
+    task: ScanTask, cfg: ScanConfig, run_fingerprint: dict[str, Any]
+) -> tuple[ScanTask, ScanSummary]:
+    return task, scan_one_file_worker(
+        task.file, cfg, run_fingerprint, row_groups=task.row_groups
+    )
 
 
 def collect_files(inputs: list[str]) -> list[Path]:
@@ -161,6 +171,11 @@ def check_item_text_sidecar(cfg: ScanConfig) -> None:
 def do_scan(cfg: ScanConfig, *, print_progress: bool = True) -> RunSummary:
     """Scan every shard in ``cfg.inputs`` with a pool of ``cfg.workers`` processes.
 
+    When there are too few shards to keep the workers busy (or
+    ``cfg.rows_per_task`` is set), Parquet shards are split into row-group
+    ranges scanned in parallel and merged back per shard; see
+    ``corpus_assay.scanner.tasks``.
+
     Workers are started with ``spawn``, so a script that calls this must do so
     under ``if __name__ == "__main__":``; otherwise a ``RuntimeError`` says so.
     """
@@ -169,7 +184,8 @@ def do_scan(cfg: ScanConfig, *, print_progress: bool = True) -> RunSummary:
     files = collect_files(cfg.inputs)
 
     run_fingerprint = build_run_fingerprint(cfg)
-    scan_func = partial(scan_one_file_worker, cfg=cfg, run_fingerprint=run_fingerprint)
+    plan = plan_scan_tasks(files, cfg, run_fingerprint)
+    scan_func = partial(_run_task, cfg=cfg, run_fingerprint=run_fingerprint)
 
     total_scanned = 0
     total_contaminated = 0
@@ -179,6 +195,39 @@ def do_scan(cfg: ScanConfig, *, print_progress: bool = True) -> RunSummary:
 
     ok = 0
     failed = 0
+
+    def record(summary: ScanSummary) -> None:
+        nonlocal ok, failed, total_scanned, total_contaminated
+        nonlocal total_empty_after_filter
+        per_file.append(summary)
+        if summary.error is None:
+            ok += 1
+            total_scanned += summary.scanned
+            total_contaminated += summary.contaminated
+            total_empty_after_filter += summary.empty_after_filter
+            for channel, count in summary.contaminated_by_channel.items():
+                total_by_channel[channel] = total_by_channel.get(channel, 0) + count
+        else:
+            failed += 1
+
+        if print_progress and summary.error is None and ok % 100 == 0:
+            rate = (total_contaminated / total_scanned) if total_scanned else 0.0
+            print(
+                f"[scan:PROGRESS] Files ok: {ok:,}/{len(files):,} | "
+                f"Failed: {failed:,} | "
+                f"Docs: ~{total_scanned:,} | "
+                f"Contam: {total_contaminated:,} ({rate:.4%})",
+                file=sys.stderr,
+            )
+
+    for summary in plan.done:
+        record(summary)
+
+    # Finished ranges of each split shard; merged into the shard's outputs once
+    # every range is in.
+    finished_parts: dict[Path, dict[tuple[int, int], ScanSummary]] = {
+        f: {} for f in plan.parts
+    }
 
     # Spawned workers re-import the package and see only the bundled default
     # config; re-stage the parent's active config (e.g. a --ngram-config
@@ -191,28 +240,17 @@ def do_scan(cfg: ScanConfig, *, print_progress: bool = True) -> RunSummary:
             initargs=(active_ngram_config_path(),),
         ) as pool,
     ):
-        results = pool.imap_unordered(scan_func, files)
-        for summary in _iter_pool_results(results, guard_marker):
-            per_file.append(summary)
-
-            if summary.error is None:
-                ok += 1
-                total_scanned += summary.scanned
-                total_contaminated += summary.contaminated
-                total_empty_after_filter += summary.empty_after_filter
-                for channel, count in summary.contaminated_by_channel.items():
-                    total_by_channel[channel] = total_by_channel.get(channel, 0) + count
-            else:
-                failed += 1
-
-            if print_progress and ok > 0 and ok % 100 == 0:
-                rate = (total_contaminated / total_scanned) if total_scanned else 0.0
-                print(
-                    f"[scan:PROGRESS] Files ok: {ok:,}/{len(files):,} | "
-                    f"Failed: {failed:,} | "
-                    f"Docs: ~{total_scanned:,} | "
-                    f"Contam: {total_contaminated:,} ({rate:.4%})",
-                    file=sys.stderr,
+        results = pool.imap_unordered(scan_func, plan.tasks)
+        for task, summary in _iter_pool_results(results, guard_marker):
+            if task.row_groups is None:
+                record(summary)
+                continue
+            done = finished_parts[task.file]
+            done[task.row_groups] = summary
+            ranges = plan.parts[task.file]
+            if len(done) == len(ranges):
+                record(
+                    merge_part_outputs(task.file, ranges, done, cfg, run_fingerprint)
                 )
 
     rate = (total_contaminated / total_scanned) if total_scanned else 0.0

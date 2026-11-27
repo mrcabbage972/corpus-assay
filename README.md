@@ -76,6 +76,9 @@ of the worker processes.
 - **Scaling.** Throughput grows nearly linearly with physical cores: 7.1× at 8 workers
   (mmap). Documents/s depends on document length, so MB/s of text is the more portable
   figure, about 3.5 MB/s per worker.
+- **Few large shards.** Parquet shards are split across workers by row group when
+  there are fewer than 4 shards per worker, so one big file still uses every core.
+  `--rows-per-task` sets the split size; outputs are the same either way.
 - **Large indexes.** Use the mmap backend, the default with more than one worker. It
   shares one copy of the index across workers. With a 1.6 GB index at 8 workers, peak
   memory was 2.2 GB with mmap and 29.9 GB with the in-memory backend.

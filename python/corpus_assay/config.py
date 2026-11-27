@@ -94,6 +94,11 @@ class ScanConfig(BaseModel):
     ngram: int = 13
     min_coverage: float = Field(default=0.001, ge=0.0, le=1.0)
     workers: int = os.cpu_count() or 1
+    # Rows per scan task when Parquet shards are split across workers by row
+    # group. `None` (auto) splits only when there are fewer shards than
+    # 4 x workers, into about 4 x workers tasks; 0 never splits (one task per
+    # shard). Each shard's outputs are the same however it is split.
+    rows_per_task: int | None = Field(default=None, ge=0)
     index_backend: str = "auto"
     # Records are split on this separator and each part is scored on its own.
     # `None` turns splitting off (and the typo replacement with it): a record is

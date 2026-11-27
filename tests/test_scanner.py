@@ -38,12 +38,13 @@ def cfg(workdir: Path) -> Any:
     index_path.write_text("x", encoding="utf-8")
 
     class Cfg(SimpleNamespace):
-        def model_dump(self) -> dict[str, Any]:
+        def model_dump(self, exclude: Any = ()) -> dict[str, Any]:
             # Mirror Pydantic model_dump() enough for fingerprinting.
-            return {
+            dumped = {
                 "inputs": self.inputs,
                 "out_dir": self.out_dir,
                 "workers": self.workers,
+                "rows_per_task": self.rows_per_task,
                 "text_keys": self.text_keys,
                 "messages_key": self.messages_key,
                 "id_key": self.id_key,
@@ -72,11 +73,13 @@ def cfg(workdir: Path) -> Any:
                 "exact_min_chars": self.exact_min_chars,
                 "confirm": self.confirm,
             }
+            return {k: v for k, v in dumped.items() if k not in exclude}
 
     return Cfg(
         inputs=["shards/*.jsonl"],
         out_dir=str(out_dir),
         workers=1,
+        rows_per_task=None,
         text_keys=["text"],
         messages_key=None,
         id_key="id",
@@ -192,6 +195,7 @@ def patch_rust_scanner(monkeypatch: pytest.MonkeyPatch) -> None:
         exact_min_chars: int = 12,
         confirm: bool = False,
         channel_counts: dict[str, int] | None = None,
+        row_groups: tuple[int, int] | None = None,
     ):
         # distinguish shards by stem (the hits path embeds it; JSONL input arrives
         # as an in-memory Parquet buffer without a file name)
