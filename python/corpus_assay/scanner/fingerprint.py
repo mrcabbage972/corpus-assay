@@ -73,7 +73,7 @@ def build_run_fingerprint(cfg: ScanConfig) -> dict[str, Any]:
         # it writes, so a run resumed with other values reuses its summaries.
         "config_sha256": hashlib.sha256(
             json.dumps(
-                cfg.model_dump(exclude=PARALLELISM_FIELDS), sort_keys=True
+                cfg.model_dump(exclude=set(PARALLELISM_FIELDS)), sort_keys=True
             ).encode("utf-8")
         ).hexdigest(),
         "ngram_config_sha256": _file_sha256(Path(active_ngram_config_path())),
