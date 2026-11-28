@@ -11,6 +11,9 @@ from corpus_assay.config import ScanConfig
 from corpus_assay.constants import INDEX_FORMAT_VERSION, ITEMS_TEXT_SUFFIX
 from corpus_assay.normalization import active_ngram_config_path
 
+# ScanConfig fields that only decide how a scan is parallelized.
+PARALLELISM_FIELDS = frozenset({"workers", "rows_per_task"})
+
 
 def _file_sha256(path: Path) -> str | None:
     try:
@@ -66,8 +69,12 @@ def build_run_fingerprint(cfg: ScanConfig) -> dict[str, Any]:
         "index_items_text_sha256": _file_sha256(
             index_path.with_name(f"{index_path.name}{ITEMS_TEXT_SUFFIX}")
         ),
+        # Worker count and task size change how the scan is parallelized, not what
+        # it writes, so a run resumed with other values reuses its summaries.
         "config_sha256": hashlib.sha256(
-            json.dumps(cfg.model_dump(), sort_keys=True).encode("utf-8")
+            json.dumps(
+                cfg.model_dump(exclude=set(PARALLELISM_FIELDS)), sort_keys=True
+            ).encode("utf-8")
         ).hexdigest(),
         "ngram_config_sha256": _file_sha256(Path(active_ngram_config_path())),
         "library_version": library_version(),

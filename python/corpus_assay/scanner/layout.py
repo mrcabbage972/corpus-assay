@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -61,6 +62,24 @@ class OutputLayout:
     @property
     def run_manifest_json(self) -> Path:
         return self.out_dir / "_RUN_MANIFEST.json"
+
+    @property
+    def parts_dir(self) -> Path:
+        """Outputs of shards scanned in row-group ranges, until they are merged."""
+        return self.out_dir / "_parts"
+
+    def part_layout(self, stem: str, row_groups: tuple[int, int]) -> "OutputLayout":
+        """The layout one row-group range ``[start, end)`` of a shard writes to."""
+        start, end = row_groups
+        return OutputLayout(self.parts_dir / stem / f"rg{start:06d}-{end:06d}")
+
+    def remove_parts(self, stem: str) -> None:
+        """Discard a completed shard's checkpoints, including superseded ranges."""
+        shutil.rmtree(self.parts_dir / stem, ignore_errors=True)
+        try:
+            self.parts_dir.rmdir()  # only once every split shard is complete
+        except OSError:
+            pass
 
     def validate_layout(self) -> None:
         missing = []

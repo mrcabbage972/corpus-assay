@@ -430,6 +430,18 @@ class ScanOptions(NamedTuple):
         help="Parallel worker processes.",
         show_default="CPU count",
     )
+    rows_per_task: int | None = typer.Option(
+        None,
+        "--rows-per-task",
+        min=0,
+        help=(
+            "Split Parquet shards into row-group ranges of about this many rows, "
+            "each scanned by its own worker, so a few large shards still use every "
+            "worker. Default: split only when there are fewer than 4 x --workers "
+            "shards. 0: one task per shard. Outputs are the same either way."
+        ),
+        show_default="auto",
+    )
     index_backend: str = typer.Option(
         "auto", help="Index backend: auto, memory, or mmap."
     )
@@ -597,6 +609,7 @@ def _scan_config_from_options(
         min_coverage=cfg.min_coverage,
         out_dir=str(out_dir),
         workers=opts.workers,
+        rows_per_task=opts.rows_per_task,
         index_backend=opts.index_backend,
         packed_doc_sep=None if opts.no_split else DEFAULT_PACKED_DOC_SEP,
         max_return_records=None if opts.all_records else opts.max_return_records,

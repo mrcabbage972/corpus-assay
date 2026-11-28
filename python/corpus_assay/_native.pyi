@@ -1,11 +1,12 @@
 """Type stubs for the compiled Rust extension (``src/lib.rs``)."""
 
+import os
 from typing import IO, Any
 
 __version__: str
 
 def scan_stream_rust(
-    input: IO[bytes],
+    input: IO[bytes] | str | os.PathLike[str],
     text_key: str | list[str],
     id_key: str | None,
     index_path: str,
@@ -32,6 +33,7 @@ def scan_stream_rust(
     exact_min_chars: int = 12,
     confirm: bool = False,
     channel_counts: dict[str, int] | None = None,
+    row_groups: tuple[int, int] | None = None,
 ) -> tuple[int, int, list[str], int]:
     """Scan a Parquet stream; returns ``(scanned, contaminated, records, empty)``.
 
@@ -49,6 +51,11 @@ def scan_stream_rust(
     ``confirm`` the copy-vs-variant evidence; both need the index's
     ``.items.text.jsonl``. ``channel_counts``, when given, receives the flagged
     sub-documents per enabled channel (``ngram``, ``spaced``, ``exact``).
+
+    ``input`` is a Parquet file path (read in place) or a binary file-like object
+    (copied to a temporary file first). ``row_groups=(start, end)`` reads only
+    that half-open range of the file's row groups; ``row_index`` in the records
+    still counts rows from the start of the file.
     """
 
 def set_ngram_config_path(path: str) -> None: ...

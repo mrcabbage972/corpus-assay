@@ -112,6 +112,12 @@ normalization hashes.
 └── contaminated_docs/<shard>.decontam.sample.ndjson
 ```
 
+A Parquet shard split across workers (see `--rows-per-task`) is scanned in
+row-group ranges under `_parts/<shard>/`; once every range is done they are merged
+into the shard's files above, which match a scan of the whole shard, and
+`_parts/<shard>/` is removed. Parts left by an interrupted run are reused when it
+is resumed.
+
 - **`_FINAL_SUMMARY.json`** holds the run totals: `total_files`, `failed_files`,
   `total_docs_scanned`, `total_contaminated`, `contamination_rate`,
   `total_empty_after_filter` and `total_contaminated_by_channel`, the flagged
